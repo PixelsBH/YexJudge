@@ -1,10 +1,13 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"net/http"
+	"time"
 	"yexjudge/internal/judge"
+	"yexjudge/internal/runner"
 )
 
 type HealthResponse struct {
@@ -23,21 +26,46 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 func judgeHandler(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 
-	var job judge.Job
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+
+	var job judge.Job
+
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+
 	err := json.NewDecoder(r.Body).Decode(&job)
 	if err != nil {
 		http.Error(w, "Invalid request payload", http.StatusBadRequest)
 		log.Println("failed to decode job:", err)
 		return
 	}
-	result := judge.Result{
-		Status: judge.Accepted,
+
+	runner := &runner.DockerRunner{}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	runRes, err := runner.Run(ctx, "cmd", "echo", "hello")
+
+	//Temporary test
+	log.Println("stdout:", runRes.Stdout)
+	log.Println("stderr:", runRes.Stderr)
+	log.Println("exit:", runRes.ExitCode)
+	log.Println("timeout:", runRes.TimedOut)
+
+	if err != nil {
+		http.Error(w, "Execution failed", http.StatusInternalServerError)
+		log.Println("runner error:", err)
+		return
 	}
+
+	result := judge.Result{
+		Status:       judge.Accepted,
+		ErrorMessage: runRes.Stderr,
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(result); err != nil {
 		log.Println("failed to encode result:", err)
