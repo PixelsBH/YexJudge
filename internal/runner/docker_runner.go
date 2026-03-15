@@ -5,16 +5,20 @@ import (
 	"context"
 	"io"
 	"os/exec"
+	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
 
 type DockerRunner struct{}
 
-func (d *DockerRunner) Run(ctx context.Context, cmd string, args ...string) (*RunResult, error) {
+func (d *DockerRunner) Run(ctx context.Context, input string, cmd string, args ...string) (*RunResult, error) {
 	start := time.Now()
 
 	command := exec.CommandContext(ctx, cmd, args...)
+
+	command.Stdin = strings.NewReader(input)
 
 	command.SysProcAttr = &syscall.SysProcAttr{
 		Setpgid: true,
@@ -35,11 +39,23 @@ func (d *DockerRunner) Run(ctx context.Context, cmd string, args ...string) (*Ru
 	}
 
 	var stdoutBuf, stderrBuf bytes.Buffer
+	var wg sync.WaitGroup
 
-	go io.Copy(&stdoutBuf, stdoutPipe)
-	go io.Copy(&stderrBuf, stderrPipe)
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		io.Copy(&stdoutBuf, stdoutPipe)
+	}()
+
+	go func() {
+		defer wg.Done()
+		io.Copy(&stderrBuf, stderrPipe)
+	}()
 
 	err = command.Wait()
+
+	wg.Wait()
 
 	result := &RunResult{
 		Stdout:   stdoutBuf.String(),
@@ -47,9 +63,12 @@ func (d *DockerRunner) Run(ctx context.Context, cmd string, args ...string) (*Ru
 		TimeUsed: time.Since(start),
 	}
 
-	if ctx.Err() == context.DeadlineExceeded && command.Process != nil {
+	if ctx.Err() == context.DeadlineExceeded {
 		result.TimedOut = true
-		syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
+
+		if command.Process != nil {
+			syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
+		}
 	}
 
 	if err != nil {
