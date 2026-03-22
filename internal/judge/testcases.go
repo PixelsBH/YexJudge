@@ -9,7 +9,7 @@ import (
 
 func runTestCases(
 	ctx context.Context, executor Executor,
-	containerName string, job Job, spec languages.Spec) (Result, error) {
+	sandbox *Sandbox, job Job, spec languages.Spec) (Result, error) {
 	maxRuntimeMs := 0
 
 	for _, tc := range job.TestCases {
@@ -20,7 +20,7 @@ func runTestCases(
 
 		runRes, err := executor.RunTestCase(
 			ctxRun,
-			containerName,
+			sandbox,
 			tc.Input,
 			spec,
 		)

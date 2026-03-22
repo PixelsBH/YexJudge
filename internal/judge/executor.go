@@ -10,9 +10,9 @@ import (
 
 type Executor interface {
 	Compile(ctx context.Context, workspace string, spec languages.Spec) (*runner.RunResult, error)
-	StartSandbox(ctx context.Context, workspace string, limits Limits) (string, error)
-	RemoveSandbox(containerName string)
-	RunTestCase(ctx context.Context, containerName string, input string, spec languages.Spec) (*runner.RunResult, error)
+	StartSandbox(ctx context.Context, workspace string, limits Limits) (*Sandbox, error)
+	ReleaseSandbox(sandbox *Sandbox)
+	RunTestCase(ctx context.Context, sandbox *Sandbox, input string, spec languages.Spec) (*runner.RunResult, error)
 }
 
 type DockerExecutor struct {
@@ -40,7 +40,7 @@ func (e *DockerExecutor) Compile(ctx context.Context,
 }
 
 func (e *DockerExecutor) StartSandbox(ctx context.Context,
-	workspace string, limits Limits) (string, error) {
+	workspace string, limits Limits) (*Sandbox, error) {
 	containerName := fmt.Sprintf("yexjudge-%d", time.Now().UnixNano())
 	memoryLimit := fmt.Sprintf("%dm", limits.MemoryLimitMb)
 
@@ -66,33 +66,33 @@ func (e *DockerExecutor) StartSandbox(ctx context.Context,
 		"sleep", "60",
 	)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
-	return containerName, nil
+	return &Sandbox{ContainerName: containerName}, nil
 }
 
-func (e *DockerExecutor) RemoveSandbox(containerName string) {
+func (e *DockerExecutor) ReleaseSandbox(sandbox *Sandbox) {
 	_, _ = e.runner.Run(
 		context.Background(),
 		"",
 		"docker",
 		"rm",
 		"-f",
-		containerName,
+		sandbox.ContainerName,
 	)
 }
 
 func (e *DockerExecutor) RunTestCase(
 	ctx context.Context,
-	containerName string,
+	sandbox *Sandbox,
 	input string,
 	spec languages.Spec,
 ) (*runner.RunResult, error) {
 	execArgs := []string{
 		"exec",
 		"-i",
-		containerName,
+		sandbox.ContainerName,
 	}
 	execArgs = append(execArgs, spec.RunCommand()...)
 

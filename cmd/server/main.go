@@ -44,8 +44,10 @@ func main() {
 	)
 
 	executor := judge.NewDockerExecutor(cmdRunner)
+	pool := judge.NewExecutorSandboxPool(executor)
 
-	judgeService = judge.NewService(executor, registry)
+
+	judgeService = judge.NewService(executor, pool, registry)
 
 	http.HandleFunc("/health", healthHandler)
 	http.HandleFunc("/judge", judgeHandler)

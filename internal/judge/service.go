@@ -8,12 +8,14 @@ import (
 
 type Service struct {
 	executor Executor
+	pool     SandboxPool
 	registry *languages.Registry
 }
 
-func NewService(executor Executor, registry *languages.Registry) *Service {
+func NewService(executor Executor, pool SandboxPool, registry *languages.Registry) *Service {
 	return &Service{
 		executor: executor,
+		pool:     pool,
 		registry: registry,
 	}
 }
@@ -46,11 +48,11 @@ func (s *Service) Judge(ctx context.Context, job Job) (Result, error) {
 		}, nil
 	}
 
-	containerName, err := s.executor.StartSandbox(ctx, workspace, job.Limits)
+	sandbox, err := s.pool.Acquire(ctx, workspace, job.Limits)
 	if err != nil {
 		return Result{}, err
 	}
-	defer s.executor.RemoveSandbox(containerName)
+	defer s.pool.Release(sandbox)
 
-	return runTestCases(ctx, s.executor, containerName, job, spec)
+	return runTestCases(ctx, s.executor, sandbox, job, spec)
 }
