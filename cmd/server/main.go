@@ -5,8 +5,11 @@ import (
 	"log"
 	"net/http"
 	"yexjudge/internal/judge"
+	"yexjudge/internal/judge/languages"
 	"yexjudge/internal/runner"
 )
+
+var judgeService *judge.Service
 
 func judgeHandler(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
@@ -22,10 +25,8 @@ func judgeHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cmdRunner := &runner.DockerRunner{}
-	service := judge.NewService(cmdRunner)
+	result, err := judgeService.Judge(r.Context(), job)
 
-	result, err := service.Judge(r.Context(), job)
 	if err != nil {
 		http.Error(w, "Execution failed", http.StatusInternalServerError)
 		log.Println("judge service error:", err)
@@ -37,6 +38,15 @@ func judgeHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
+	cmdRunner := &runner.DockerRunner{}
+	registry := languages.NewRegistry(
+		languages.Cpp{},
+	)
+
+	executor := judge.NewDockerExecutor(cmdRunner)
+
+	judgeService = judge.NewService(executor, registry)
+
 	http.HandleFunc("/health", healthHandler)
 	http.HandleFunc("/judge", judgeHandler)
 

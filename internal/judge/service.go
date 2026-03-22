@@ -3,27 +3,38 @@ package judge
 import (
 	"context"
 	"os"
-	"yexjudge/internal/runner"
+	"yexjudge/internal/judge/languages"
 )
 
 type Service struct {
-	runner runner.Runner
+	executor Executor
+	registry *languages.Registry
 }
 
-func NewService(r runner.Runner) *Service {
+func NewService(executor Executor, registry *languages.Registry) *Service {
 	return &Service{
-		runner: r,
+		executor: executor,
+		registry: registry,
 	}
 }
 
 func (s *Service) Judge(ctx context.Context, job Job) (Result, error) {
-	workspace, err := createWorkspace(job)
+	spec, ok := s.registry.Get(job.Language)
+	if !ok {
+		return Result{
+			Status:       CompilationError,
+			ErrorMessage: "unsupported language",
+		}, nil
+	}
+
+	workspace, err := createWorkspace(job, spec)
+
 	if err != nil {
 		return Result{}, err
 	}
 	defer os.RemoveAll(workspace)
 
-	compileRes, err := compileProgram(ctx, s.runner, workspace)
+	compileRes, err := s.executor.Compile(ctx, workspace, spec)
 	if err != nil {
 		return Result{}, err
 	}
@@ -35,11 +46,11 @@ func (s *Service) Judge(ctx context.Context, job Job) (Result, error) {
 		}, nil
 	}
 
-	containerName, err := startSandbox(ctx, s.runner, workspace, job.Limits)
+	containerName, err := s.executor.StartSandbox(ctx, workspace, job.Limits)
 	if err != nil {
 		return Result{}, err
 	}
-	defer removeSandbox(s.runner, containerName)
+	defer s.executor.RemoveSandbox(containerName)
 
-	return runTestCases(ctx, s.runner, containerName, job)
+	return runTestCases(ctx, s.executor, containerName, job, spec)
 }

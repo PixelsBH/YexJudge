@@ -2,231 +2,165 @@
 
 ## Overview
 
-YexJudge is an HTTP-based online judge for code submissions. The current implementation accepts a submission, compiles the source code inside Docker, executes the compiled binary against each test case inside an isolated runtime container, and returns the first failing verdict or `accepted` if all test cases pass.
+YexJudge is an asynchronous online judge designed for safe and efficient code execution at scale.
 
-The system is intentionally simple at this stage:
+The long-term architecture separates request handling from code execution:
 
-- A single HTTP server exposes the API.
-- Each request gets its own temporary workspace on the host.
-- Compilation is performed in a short-lived `gcc:13` container.
-- Execution is performed in a dedicated sandbox container with CPU, memory, PID, and network restrictions.
-- Test cases are evaluated sequentially.
+- The API layer validates and accepts submissions.
+- Valid submissions are pushed to a queue.
+- Judge workers pull jobs from the queue.
+- Workers compile code using a reusable compile environment.
+- Workers borrow an isolated runtime sandbox from a sandbox pool.
+- All test cases for a single submission run inside the same borrowed sandbox.
+- After execution, the sandbox is reset and returned to the pool.
 
-## Current Architecture
+This design avoids executing submissions directly in the HTTP request path, avoids creating a fresh runtime container for every test case, and prepares the system for horizontal scaling.
 
-```mermaid
-flowchart TD
-    Client[Client] -->|POST /judge| Server[HTTP Server]
-    Server --> Decode[Decode and validate job payload]
-    Decode --> Workspace[Create temporary workspace]
-    Workspace --> WriteSource[Write source to main.cpp]
-    WriteSource --> Compile[Compile inside gcc:13 container]
-    Compile -->|Compilation error| CE[Return compilation_error]
-    Compile -->|Success| Sandbox[Start isolated runtime container]
-    Sandbox --> Execute[Run test cases with docker exec]
-    Execute --> Compare[Compare program output with expected output]
-    Compare -->|Mismatch| WA[Return wrong_answer]
-    Execute -->|Timeout| TLE[Return time_limit_exceeded]
-    Execute -->|Non-zero exit| RE[Return runtime_error]
-    Compare -->|All passed| AC[Return accepted]
-    CE --> Cleanup[Remove container and workspace]
-    WA --> Cleanup
-    TLE --> Cleanup
-    RE --> Cleanup
-    AC --> Cleanup
-```
-
-## Main Components
-
-### 1. API Server
-
-The API server is implemented in [`cmd/server/main.go`](/home/pixels/Documents/Projects/YexJudge/cmd/server/main.go). It exposes:
-
-- `GET /health` for a simple liveness check
-- `POST /judge` for submission evaluation
-
-The server is responsible for:
-
-- reading and decoding the request body
-- creating a temporary workspace
-- writing the submitted source file
-- invoking the runner for compilation and execution
-- building the final judge response
-
-### 2. Judge Data Model
-
-The request and response types live in [`internal/judge/types.go`](/home/pixels/Documents/Projects/YexJudge/internal/judge/types.go).
-
-Core request fields:
-
-- `language`
-- `sourceCode`
-- `testCases`
-- `limits.timeLimitMs`
-- `limits.memoryLimitMb`
-
-Core response fields:
-
-- `status`
-- `runtimeMs`
-- `memoryMb`
-- `failedTestCase`
-- `errorMessage`
-
-Supported verdicts:
-
-- `accepted`
-- `wrong_answer`
-- `time_limit_exceeded`
-- `runtime_error`
-- `compilation_error`
-- `memory_limit_exceeded`
-
-Note: `memory_limit_exceeded` exists in the model, but the current server flow does not yet produce that verdict explicitly.
-
-### 3. Runner Abstraction
-
-The runner interface is defined in [`internal/runner/runner.go`](/home/pixels/Documents/Projects/YexJudge/internal/runner/runner.go).
-
-Its purpose is to separate execution mechanics from judge orchestration:
-
-```go
-type Runner interface {
-    Run(ctx context.Context, input string, cmd string, args ...string) (*RunResult, error)
-}
-```
-
-This keeps the server logic independent from the concrete process execution strategy.
-
-### 4. Docker Runner
-
-The current implementation uses [`internal/runner/docker_runner.go`](/home/pixels/Documents/Projects/YexJudge/internal/runner/docker_runner.go).
-
-Responsibilities:
-
-- start external commands with context cancellation
-- stream stdin to the command
-- capture stdout and stderr
-- record execution time
-- detect timeout via context deadline
-- kill the full process group if execution exceeds the deadline
-
-Execution metadata is stored in [`internal/runner/result.go`](/home/pixels/Documents/Projects/YexJudge/internal/runner/result.go).
-
-## Request Lifecycle
-
-```mermaid
-sequenceDiagram
-    participant C as Client
-    participant S as Server
-    participant W as Temp Workspace
-    participant DC as Compile Container
-    participant DR as Runtime Container
-
-    C->>S: POST /judge
-    S->>S: Decode Job JSON
-    S->>W: Create temp directory
-    S->>W: Write main.cpp
-    S->>DC: docker run gcc:13 g++
-    DC-->>S: Compile result
-
-    alt Compilation failed
-        S-->>C: compilation_error
-    else Compilation succeeded
-        S->>DR: docker run -d alpine sleep 60
-        loop For each test case
-            S->>DR: docker exec /workspace/main
-            DR-->>S: stdout, stderr, exit code, time
-            S->>S: Compare output and check limits
-        end
-        S-->>C: accepted or first failing verdict
-    end
-
-    S->>DR: docker rm -f
-    S->>W: Remove temp directory
-```
-
-## Execution Model
-
-### Compilation
-
-Submitted code is written to `main.cpp` in a temporary host workspace. The server then compiles it with:
-
-- image: `gcc:13`
-- output binary: `/workspace/main`
-
-If compilation fails, the request ends immediately with `compilation_error` and the compiler stderr is returned as `errorMessage`.
-
-### Runtime Isolation
-
-If compilation succeeds, the server starts a runtime container and keeps it alive briefly while running test cases with `docker exec`.
-
-Current isolation settings include:
-
-- `--memory <limit>m`
-- `--cpus 1`
-- `--network none`
-- `--pids-limit 64`
-- `--security-opt no-new-privileges`
-- `--tmpfs /tmp`
-- mounted workspace at `/workspace`
-
-This is a practical first step toward sandboxing, though it is still lighter-weight than a dedicated judge sandbox like gVisor, nsjail, or Firecracker.
-
-### Test Case Evaluation
-
-For each test case, the server:
-
-1. creates a per-test timeout context using `limits.timeLimitMs`
-2. runs the compiled binary inside the existing container
-3. trims stdout and expected output
-4. compares them for exact match
-5. returns immediately on the first failing test
-
-The final runtime reported to the client is the maximum runtime observed across all test cases.
-
-## Design Characteristics
-
-### Strengths
-
-- small and easy-to-understand architecture
-- clear separation between HTTP handling and command execution
-- basic process isolation using Docker
-- per-request workspace cleanup
-- deterministic first-failure verdict handling
-
-### Current Limitations
-
-- single-node design with no queue or worker pool
-- one submission is handled directly in the request path
-- compilation still creates a fresh container per request
-- runtime memory usage is not measured or reported yet
-- no persistent sandbox reuse
-- no language-specific execution pipeline beyond the current C++ flow
-
-## Future Architecture Direction
-
-As throughput requirements grow, the most natural next step is moving from direct request execution to a queue-backed worker model with reusable sandboxes.
+## Target Architecture
 
 ```mermaid
 flowchart LR
-    Client[Client] --> API[API Server]
-    API --> Queue[Job Queue]
-    Queue --> Worker1[Worker 1]
-    Queue --> Worker2[Worker 2]
-    Queue --> WorkerN[Worker N]
-    Worker1 --> Pool[Reusable Sandbox Pool]
-    Worker2 --> Pool
-    WorkerN --> Pool
+    Client[Client] --> Gateway[API Gateway]
+    Gateway --> Validate[Request Validation]
+    Validate --> Queue[Job Queue]
+    Queue --> Worker1[Judge Worker 1]
+    Queue --> Worker2[Judge Worker 2]
+    Queue --> WorkerN[Judge Worker N]
+
+    Worker1 --> CompilePool[Reusable Compile Environment]
+    Worker2 --> CompilePool
+    WorkerN --> CompilePool
+
+    Worker1 --> SandboxPool[Reusable Sandbox Pool]
+    Worker2 --> SandboxPool
+    WorkerN --> SandboxPool
 ```
 
-That design would improve:
+## Core Principles
 
-- latency by reducing container startup overhead
-- throughput under concurrent load
-- fault isolation between API and execution workers
-- horizontal scalability
+### 1. Thin API Layer
 
-## Summary
+The API layer should only:
 
-The current YexJudge architecture is a solid minimal judge implementation: simple HTTP API, temporary workspace creation, Docker-based compilation, isolated execution, and sequential verdict evaluation. It is well suited for early development and correctness testing, while leaving a clear upgrade path toward a worker-pool and sandbox-reuse model as the system matures.
+- decode requests
+- validate payloads
+- reject unsupported or wasteful jobs early
+- enqueue accepted submissions
+- expose status and result endpoints
+
+The API layer should not compile or execute user code directly.
+
+### 2. Async Execution Model
+
+Submission execution must happen asynchronously through workers.
+
+Flow:
+
+1. Client submits code.
+2. API validates request.
+3. API stores or enqueues submission.
+4. Worker picks up the job.
+5. Worker compiles code.
+6. Worker borrows a runtime sandbox.
+7. Worker runs all test cases.
+8. Worker stores the final verdict.
+9. Client polls or fetches the result.
+
+This improves:
+
+- API responsiveness
+- fault isolation
+- throughput under load
+- easier retry and recovery behavior
+
+### 3. Reusable Compile Environment
+
+Compilation should not create a fresh container for every submission forever.
+
+Instead, YexJudge should use a reusable compile environment or compile worker model.
+
+Responsibilities:
+
+- provide language toolchains
+- compile source into artifacts
+- keep compile concerns separate from runtime isolation
+- reduce cold start overhead
+
+This environment may still be isolated, but it should be optimized for repeated compilation work rather than one-off container startup.
+
+### 4. Reusable Runtime Sandbox Pool
+
+Runtime execution should use a pool of pre-created isolated sandboxes.
+
+Each worker:
+
+- borrows one sandbox for a submission
+- runs all test cases in that sandbox
+- resets the sandbox after the submission completes
+- returns it to the pool
+
+This avoids:
+
+- creating a new runtime container for every test case
+- paying full startup cost for every submission
+
+### 5. One Sandbox Per Submission
+
+All test cases for a single submission should run in the same borrowed sandbox.
+
+Benefits:
+
+- much lower overhead than per-test-case container creation
+- easier runtime accounting for a submission
+- clean boundary for sandbox reset after completion
+
+The judge still evaluates test cases sequentially and returns on first failure unless future policy changes.
+
+## Main Components
+
+### API Gateway
+
+Responsibilities:
+
+- request size limiting
+- schema validation
+- supported-language validation
+- auth and rate limiting in future
+- enqueueing valid submissions
+
+### Job Queue
+
+Responsibilities:
+
+- decouple API from execution
+- buffer bursts of traffic
+- support retries and worker scaling
+
+### Judge Worker
+
+Responsibilities:
+
+- pull jobs from queue
+- resolve language pipeline
+- compile submission
+- borrow sandbox
+- run test cases
+- compute verdict
+- persist result
+
+### Compile Environment
+
+Responsibilities:
+
+- provide compiler and interpreter toolchains
+- produce build artifacts
+- stay separate from runtime sandbox
+
+### Sandbox Pool
+
+Responsibilities:
+
+- provide isolated runtime environments
+- enforce resource limits
+- reset environment after execution
+- support reuse safely

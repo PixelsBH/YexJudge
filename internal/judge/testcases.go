@@ -4,15 +4,12 @@ import (
 	"context"
 	"strings"
 	"time"
-	"yexjudge/internal/runner"
+	"yexjudge/internal/judge/languages"
 )
 
 func runTestCases(
-	ctx context.Context,
-	r runner.Runner,
-	containerName string,
-	job Job,
-) (Result, error) {
+	ctx context.Context, executor Executor,
+	containerName string, job Job, spec languages.Spec) (Result, error) {
 	maxRuntimeMs := 0
 
 	for _, tc := range job.TestCases {
@@ -21,15 +18,13 @@ func runTestCases(
 			time.Duration(job.Limits.TimeLimitMs)*time.Millisecond,
 		)
 
-		runRes, err := r.Run(
+		runRes, err := executor.RunTestCase(
 			ctxRun,
-			tc.Input+"\n",
-			"docker",
-			"exec",
-			"-i",
 			containerName,
-			"/workspace/main",
+			tc.Input,
+			spec,
 		)
+
 		cancelRun()
 
 		if err != nil {
