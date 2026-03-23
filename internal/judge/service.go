@@ -36,19 +36,21 @@ func (s *Service) Judge(ctx context.Context, job Job) (Result, error) {
 	}
 	defer os.RemoveAll(workspace)
 
-	compileRes, err := s.executor.Compile(ctx, workspace, spec)
-	if err != nil {
-		return Result{}, err
+	if spec.NeedsCompile() {
+		compileRes, err := s.executor.Compile(ctx, workspace, spec)
+		if err != nil {
+			return Result{}, err
+		}
+
+		if compileRes.ExitCode != 0 {
+			return Result{
+				Status:       CompilationError,
+				ErrorMessage: compileRes.Stderr,
+			}, nil
+		}
 	}
 
-	if compileRes.ExitCode != 0 {
-		return Result{
-			Status:       CompilationError,
-			ErrorMessage: compileRes.Stderr,
-		}, nil
-	}
-
-	sandbox, err := s.pool.Acquire(ctx, workspace, job.Limits)
+	sandbox, err := s.pool.Acquire(ctx, workspace, job.Limits, spec)
 	if err != nil {
 		return Result{}, err
 	}

@@ -41,11 +41,14 @@ func main() {
 	cmdRunner := &runner.DockerRunner{}
 	registry := languages.NewRegistry(
 		languages.Cpp{},
+		languages.C{},
+		languages.Python{},
+		languages.Go{},
+		languages.Java{},
 	)
 
 	executor := judge.NewDockerExecutor(cmdRunner)
 	pool := judge.NewExecutorSandboxPool(executor)
-
 
 	judgeService = judge.NewService(executor, pool, registry)
 

@@ -10,7 +10,7 @@ import (
 
 type Executor interface {
 	Compile(ctx context.Context, workspace string, spec languages.Spec) (*runner.RunResult, error)
-	StartSandbox(ctx context.Context, workspace string, limits Limits) (*Sandbox, error)
+	StartSandbox(ctx context.Context, workspace string, limits Limits, spec languages.Spec) (*Sandbox, error)
 	ReleaseSandbox(sandbox *Sandbox)
 	RunTestCase(ctx context.Context, sandbox *Sandbox, input string, spec languages.Spec) (*runner.RunResult, error)
 }
@@ -40,7 +40,7 @@ func (e *DockerExecutor) Compile(ctx context.Context,
 }
 
 func (e *DockerExecutor) StartSandbox(ctx context.Context,
-	workspace string, limits Limits) (*Sandbox, error) {
+	workspace string, limits Limits, spec languages.Spec) (*Sandbox, error) {
 	containerName := fmt.Sprintf("yexjudge-%d", time.Now().UnixNano())
 	memoryLimit := fmt.Sprintf("%dm", limits.MemoryLimitMb)
 
@@ -62,7 +62,7 @@ func (e *DockerExecutor) StartSandbox(ctx context.Context,
 		"--tmpfs", "/tmp",
 		"--workdir", "/workspace",
 		"-v", workspace+":/workspace",
-		"alpine",
+		spec.RuntimeImage(),
 		"sleep", "60",
 	)
 	if err != nil {

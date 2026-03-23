@@ -10,6 +10,10 @@ func (Cpp) SourceFileName() string {
 	return "main.cpp"
 }
 
+func (Cpp) NeedsCompile() bool {
+	return true
+}
+
 func (Cpp) CompileImage() string {
 	return "gcc:13"
 }
@@ -25,6 +29,10 @@ func (Cpp) CompileCommand() []string {
 		"-o",
 		"/workspace/main",
 	}
+}
+
+func (Cpp) RuntimeImage() string {
+	return "alpine"
 }
 
 func (Cpp) RunCommand() []string {
