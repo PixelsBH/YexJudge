@@ -25,6 +25,11 @@ func judgeHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := judge.ValidateJob(job); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
 	result, err := judgeService.Judge(r.Context(), job)
 
 	if err != nil {

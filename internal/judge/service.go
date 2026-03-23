@@ -21,10 +21,17 @@ func NewService(executor Executor, pool SandboxPool, registry *languages.Registr
 }
 
 func (s *Service) Judge(ctx context.Context, job Job) (Result, error) {
+	if err := ValidateJob(job); err != nil {
+		return Result{
+			Status:       ValidationError,
+			ErrorMessage: err.Error(),
+		}, nil
+	}
+
 	spec, ok := s.registry.Get(job.Language)
 	if !ok {
 		return Result{
-			Status:       CompilationError,
+			Status:       ValidationError,
 			ErrorMessage: "unsupported language",
 		}, nil
 	}

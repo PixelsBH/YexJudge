@@ -35,4 +35,5 @@ const (
 	RuntimeError        Status = "runtime_error"
 	CompilationError    Status = "compilation_error"
 	MemoryLimitExceeded Status = "memory_limit_exceeded"
+	ValidationError     Status = "validation_error"
 )
