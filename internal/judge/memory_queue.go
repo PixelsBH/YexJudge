@@ -1,13 +1,19 @@
 package judge
 
-import "fmt"
+import (
+	"fmt"
+	"sync"
+)
 
 type SubmissionQueue interface {
 	Enqueue(submissionID string) error
+	Close()
 }
 
 type MemorySubmissionQueue struct {
-	ch chan string
+	mu     sync.RWMutex
+	ch     chan string
+	closed bool
 }
 
 func NewMemorySubmissionQueue(buffer int) *MemorySubmissionQueue {
@@ -17,6 +23,13 @@ func NewMemorySubmissionQueue(buffer int) *MemorySubmissionQueue {
 }
 
 func (q *MemorySubmissionQueue) Enqueue(submissionID string) error {
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+
+	if q.closed {
+		return fmt.Errorf("submission queue is closed")
+	}
+
 	select {
 	case q.ch <- submissionID:
 		return nil
@@ -27,4 +40,16 @@ func (q *MemorySubmissionQueue) Enqueue(submissionID string) error {
 
 func (q *MemorySubmissionQueue) Channel() <-chan string {
 	return q.ch
+}
+
+func (q *MemorySubmissionQueue) Close() {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	if q.closed {
+		return
+	}
+
+	q.closed = true
+	close(q.ch)
 }

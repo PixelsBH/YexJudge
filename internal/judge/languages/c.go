@@ -31,10 +31,6 @@ func (C) CompileCommand() []string {
 	}
 }
 
-func (C) RuntimeImage() string {
-	return "alpine"
-}
-
 func (C) RunCommand() []string {
 	return []string{"/workspace/main"}
 }

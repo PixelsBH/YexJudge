@@ -2,59 +2,68 @@
 
 ## Overview
 
-YexJudge is an online judge that is currently implemented as a synchronous HTTP service, but it is being shaped toward an asynchronous worker-based architecture with reusable execution infrastructure.
+YexJudge is an online judge that now supports asynchronous submission processing in a single process, and is being shaped toward a more durable worker-based architecture with reusable execution infrastructure.
 
 The project has two important architectural states:
 
 - the current codebase architecture
 - the intended target architecture
 
-The current refactor is focused on making the codebase ready for:
+The current refactor has already established the core components needed for:
 
 - multiple languages
-- reusable runtime sandboxes
+- a reusable universal runtime sandbox pool
 - worker pools
 - queue-backed asynchronous execution
 - stronger API-side validation
 
 ## Current Architecture
 
-Today, a submission still flows through the HTTP server request path, but the internal structure is no longer a single large handler.
+Today, a submission is accepted through HTTP, stored in memory, pushed into an in-memory queue, and processed by an in-process worker pool. Workers borrow pre-created containers from one universal runtime sandbox pool.
 
-The code is now split into clear layers:
+The code is now split into these layers:
 
 - HTTP layer in [`cmd/server/main.go`](/home/pixels/Documents/Projects/YexJudge/cmd/server/main.go)
+- submission retrieval endpoint in [`cmd/server/submissions.go`](/home/pixels/Documents/Projects/YexJudge/cmd/server/submissions.go)
 - judge orchestration in [`internal/judge/service.go`](/home/pixels/Documents/Projects/YexJudge/internal/judge/service.go)
 - execution mechanics in [`internal/judge/executor.go`](/home/pixels/Documents/Projects/YexJudge/internal/judge/executor.go)
 - sandbox lifecycle abstraction in [`internal/judge/pool.go`](/home/pixels/Documents/Projects/YexJudge/internal/judge/pool.go)
 - test case loop and verdicting in [`internal/judge/testcases.go`](/home/pixels/Documents/Projects/YexJudge/internal/judge/testcases.go)
 - language-specific behavior in [`internal/judge/languages/spec.go`](/home/pixels/Documents/Projects/YexJudge/internal/judge/languages/spec.go)
+- in-memory submission store in [`internal/judge/memory_store.go`](/home/pixels/Documents/Projects/YexJudge/internal/judge/memory_store.go)
+- in-memory submission queue in [`internal/judge/memory_queue.go`](/home/pixels/Documents/Projects/YexJudge/internal/judge/memory_queue.go)
 
 ### Current Flow
 
 ```mermaid
 flowchart TD
-    Client[Client] -->|POST /judge| Server[HTTP Server]
+    Client[Client] -->|POST /submissions| Server[HTTP Server]
     Server --> Decode[Decode Job]
     Decode --> Validate[Validate Payload]
-    Validate --> Service[Judge Service]
+    Validate --> Store[Save Submission as queued]
+    Store --> Queue[In-memory Submission Queue]
+    Queue --> Worker[In-process Worker Pool]
+    Worker --> Service[Judge Service]
     Service --> Registry[Language Registry]
     Service --> Workspace[Create Workspace]
     Service --> Compile[Executor Compile]
-    Compile -->|Compilation error| CE[Return compilation_error]
-    Compile -->|Success or skipped| Acquire[Sandbox Pool Acquire]
+    Compile -->|Compilation error| CE[Store compilation_error]
+    Compile -->|Success or skipped| Acquire[Acquire Universal Sandbox]
     Acquire --> Sandbox[Sandbox Handle]
-    Sandbox --> Execute[Run Test Cases]
+    Sandbox --> Stage[Copy Submission Files into Sandbox]
+    Stage --> Execute[Run Test Cases]
     Execute --> Compare[Compare Output and Verdict]
-    Compare -->|Mismatch| WA[wrong_answer]
-    Compare -->|Timeout| TLE[time_limit_exceeded]
-    Compare -->|Runtime failure| RE[runtime_error]
-    Compare -->|All passed| AC[accepted]
-    CE --> Release[Release Sandbox if acquired]
-    WA --> Release
-    TLE --> Release
-    RE --> Release
-    AC --> Release
+    Compare -->|Mismatch| WA[Store wrong_answer]
+    Compare -->|Timeout| TLE[Store time_limit_exceeded]
+    Compare -->|Runtime failure| RE[Store runtime_error]
+    Compare -->|All passed| AC[Store accepted]
+    WA --> Reset
+    TLE --> Reset
+    RE --> Reset
+    AC --> Reset[Restart and Reset Sandbox]
+    Reset --> Release[Return Sandbox to Pool]
+    Client -->|GET /submissions/id| Fetch[Submission Endpoint]
+    Fetch --> StoreLookup[Read Stored Submission Status and Result]
 ```
 
 ### Current Components
@@ -65,12 +74,15 @@ The HTTP layer is intentionally thin.
 
 Responsibilities:
 
-- receive `POST /judge`
+- receive `POST /submissions`
+- receive `GET /submissions/{id}`
 - decode request JSON
 - enforce request-size limit
 - validate obvious bad input early
-- call the judge service
-- encode the final response
+- create and store queued submissions
+- enqueue accepted submissions
+- return submission acceptance metadata
+- return stored submission status and result
 
 This layer should not contain compilation or execution logic.
 
@@ -80,6 +92,7 @@ The judge service is the orchestration layer.
 
 Responsibilities:
 
+- process an already-created submission
 - validate jobs defensively
 - resolve the language spec
 - create the workspace
@@ -87,6 +100,7 @@ Responsibilities:
 - acquire a sandbox
 - run all test cases
 - map execution results into judge verdicts
+- update submission lifecycle state in the store
 
 This is the main business-logic layer of the judge.
 
@@ -97,7 +111,9 @@ The executor is the infrastructure layer that knows how to interact with Docker.
 Responsibilities:
 
 - compile code inside the correct compile image
-- start a sandbox using the correct runtime image
+- start universal runtime sandboxes during server startup
+- configure a borrowed sandbox with the submission memory limit
+- copy submission files into a borrowed sandbox
 - release the sandbox
 - execute one test case command inside the sandbox
 
@@ -110,14 +126,31 @@ The current code already introduces:
 - a `Sandbox` handle abstraction
 - a `SandboxPool` abstraction
 
-Right now the pool is only a transitional implementation:
+The runtime pool now uses one shared custom image: `yexjudge-runtime:latest`.
 
-- `Acquire` creates a fresh sandbox through the executor
-- `Release` removes the sandbox through the executor
+Current behavior:
 
-This is intentionally done so the service can later switch to a true reusable pool without major changes.
+- the server pre-creates a fixed number of universal sandboxes at startup
+- `Acquire` borrows an available sandbox
+- source files or compiled artifacts are copied into the borrowed sandbox
+- `Release` restarts the container to terminate remaining processes and clear temporary workspace state
+- the reset sandbox is returned to the pool
 
-#### 5. Language Registry
+The custom runtime image is based on Debian slim and includes Python and a Java runtime. Compilers remain outside runtime sandboxes.
+
+#### 5. Submission Store and Queue
+
+The current async path is backed by in-memory infrastructure.
+
+Current behavior:
+
+- submissions are stored in memory
+- submission IDs are pushed into an in-memory buffered queue
+- a background goroutine consumes the queue and processes submissions
+
+This is enough to support async behavior during development, but it is not durable and is not the final production design.
+
+#### 6. Language Registry
 
 Languages are not hardcoded in the service anymore.
 
@@ -127,10 +160,9 @@ Each language spec defines:
 - whether compilation is required
 - compile image
 - compile command
-- runtime image
 - runtime command
 
-The registry maps a requested language string to the correct language spec.
+The registry maps a requested language string to the correct language spec. Runtime image choice is intentionally global because every reusable sandbox supports all configured languages.
 
 ### Current Supported Languages
 
@@ -142,24 +174,27 @@ The codebase is structured to support multiple languages through specs. At this 
 - Go
 - Java
 
-Whether each language runs successfully depends on the required runtime image being available locally.
+The shared `yexjudge-runtime:latest` image must be built locally before starting the server.
 
 ### Current Strengths
 
 - HTTP code is much cleaner than the original monolithic handler
+- submission processing is now asynchronous from the client's point of view
+- submission status can be fetched separately through `GET /submissions/{id}`
 - execution logic is no longer mixed with transport logic
 - multi-language support now has a proper abstraction
-- one sandbox is used for all test cases of a submission
-- the codebase is now shaped for future pooling and workerization
+- one borrowed sandbox is used for all test cases of a submission
+- runtime sandbox creation is no longer required for each submission
+- multiple in-process workers consume submissions concurrently
 
 ### Current Limitations
 
-- execution still happens synchronously in the request path
+- queue and submission state are only in memory
+- worker count is currently configured in code
 - a fresh compile container is still created per compiled submission
-- a fresh runtime sandbox is still created per submission
-- the current sandbox pool is only an abstraction, not a true reusable pool
-- results are not persisted
-- there is no queue or worker process yet
+- there is no durable queue yet
+- there is no worker recovery or retry model yet
+- submissions are lost on process restart
 
 ## Target Architecture
 
@@ -176,7 +211,7 @@ flowchart LR
     Worker1 --> CompilePool[Reusable Compile Environment]
     Worker2 --> CompilePool
     WorkerN --> CompilePool
-    Worker1 --> SandboxPool[Reusable Sandbox Pool]
+    Worker1 --> SandboxPool[Universal Reusable Sandbox Pool]
     Worker2 --> SandboxPool
     WorkerN --> SandboxPool
     Worker1 --> Results[Result Store]
@@ -234,9 +269,9 @@ This keeps toolchains available without rebuilding execution state for every sub
 
 Compile and runtime should remain separate concerns. The recommended model is not to use the exact same container for both compile and execution.
 
-### 4. Reusable Runtime Sandbox Pool
+### 4. Universal Reusable Runtime Sandbox Pool
 
-Runtime isolation should use a real sandbox pool.
+Runtime isolation uses a pool of pre-created containers built from one shared runtime-only image.
 
 Each worker should:
 
@@ -264,7 +299,7 @@ The best balance of speed and security for YexJudge is:
 - queue-backed workers
 - separate compile and runtime phases
 - reusable compile environments
-- reusable runtime sandbox pool
+- universal reusable runtime sandbox pool
 - one sandbox per submission
 
 This avoids:
@@ -273,21 +308,147 @@ This avoids:
 - container startup per test case
 - mixing compile tooling into runtime sandboxes unnecessarily
 
-## Planned Evolution
+## Next Work Order
 
-The intended implementation order is:
+The core architecture is already in place. The remaining work should focus on proving correctness first, then making the queue and worker model durable, then optimizing compilation.
 
-1. keep the HTTP layer thin
-2. keep orchestration in the service layer
-3. keep Docker mechanics behind the executor
-4. keep sandbox lifecycle behind the pool abstraction
-5. finish language pipelines
-6. add stronger gateway-style validation and admission control
-7. introduce submission IDs and result persistence
-8. introduce async job queue
-9. introduce worker processes
-10. replace create-and-delete sandbox behavior with real sandbox reuse
-11. replace one-off compile containers with reusable compile infrastructure
+### 1. End-to-End Runtime Verification
+
+Finish this before adding more architecture.
+
+Tasks:
+
+- build `yexjudge-runtime:latest`
+- start the server locally
+- submit working and failing programs for C, C++, Python, Go, and Java
+- verify `POST /judge` returns `202 Accepted`
+- verify `GET /submissions/{id}` transitions through `queued`, `running`, and `finished`
+- verify accepted, wrong answer, runtime error, compilation error, and timeout verdicts
+
+Reason:
+
+The reusable runtime sandbox pool is now the most important execution path. It should be proven before replacing storage or queue infrastructure.
+
+### 2. Fix Any Runtime Pool Issues Found During Testing
+
+Tasks:
+
+- confirm `docker cp` correctly stages source files and compiled artifacts into borrowed sandboxes
+- confirm sandbox restart clears `/workspace` and `/tmp`
+- confirm repeated submissions do not leak files or processes between runs
+- confirm memory limits are applied correctly before execution
+- confirm the runtime image has every command needed by language specs
+
+Reason:
+
+Reusable sandboxes are a major performance feature, but they must be clean between submissions.
+
+### 3. Move to Final API Shape
+
+Target routes:
+
+- `POST /submissions`
+- `GET /submissions/{id}`
+
+Current compatibility route:
+
+- `POST /judge`
+
+Tasks:
+
+- add `POST /submissions` using the same handler behavior as `POST /judge`
+- keep `/judge` temporarily as an alias if useful
+- eventually treat `/submissions` as the primary API
+
+Reason:
+
+The judge is now submission-oriented and asynchronous. The API should reflect that.
+
+### 4. Add Durable Submission Store and Queue
+
+Recommended first durable backend:
+
+- Postgres-only
+
+Tasks:
+
+- create a `submissions` table
+- store job payload, status, result, timestamps, and error metadata
+- replace `MemorySubmissionStore` with a Postgres implementation
+- replace the in-memory queue with database-backed claiming of queued submissions
+- use atomic `queued -> running` claims so multiple workers cannot process the same submission
+
+Reason:
+
+The current in-memory store and queue lose all jobs and results on restart. Postgres gives durable storage and a good enough queue for this project stage without adding Redis.
+
+### 5. Add Worker Recovery and Retry Rules
+
+Tasks:
+
+- track `created_at`, `updated_at`, and possibly `started_at`
+- detect submissions stuck in `running`
+- define retry limits
+- define when a stuck job becomes `failed`
+- make workers claim jobs with a lease or timeout policy
+
+Reason:
+
+Durable queueing is incomplete without recovery. A worker crash should not leave submissions stuck forever.
+
+### 6. Harden Runtime Sandbox Lifecycle
+
+Tasks:
+
+- clean up warm sandbox containers on graceful shutdown
+- replace unhealthy sandboxes automatically
+- expose pool size and available sandbox counts in logs or metrics
+- make worker count and pool size configurable through environment variables
+
+Reason:
+
+The runtime pool is central to performance. It needs predictable lifecycle behavior before production use.
+
+### 7. Harden Compilation
+
+Tasks:
+
+- add CPU, memory, PID, network, and timeout constraints to compile containers
+- cap compiler output size
+- classify compile infrastructure failures separately from user compilation errors
+- consider reusable compile pools after the current one-off compile path is stable
+
+Reason:
+
+Compilation still starts fresh containers per compiled submission. Reusable compile containers can improve latency later, but compile sandbox hardening is more important first.
+
+### 8. Add Focused Tests and Observability
+
+Tasks:
+
+- unit test validation rules
+- unit test verdict mapping in test case evaluation
+- integration test the async submission lifecycle
+- add logs for queue size, worker starts, sandbox acquire/release, and verdicts
+- later add metrics for queue depth, worker busy count, runtime duration, and compile duration
+
+Reason:
+
+The project is now complex enough that small regressions can hide in lifecycle behavior.
+
+### 9. Consider Reusable Compile Infrastructure
+
+Only do this after the runtime pool, durable store, and worker recovery are stable.
+
+Target model:
+
+- compile pools keyed by compile image or toolchain
+- separate from runtime sandboxes
+- reset compile workspace between submissions
+
+Reason:
+
+Compile reuse can reduce latency, but it is more complex and riskier than runtime reuse because compilers process untrusted input and toolchains are larger.
 
 ## Design Notes
 
@@ -299,36 +460,26 @@ Validation should exist in two places:
 - service layer as defensive validation
 
 This keeps the system safe even after multiple entrypoints or worker paths are introduced.
+Current admission caps limit submissions to `10000ms` per test case and `512MB` of sandbox memory.
 
 ### Language Strategy
 
 Each language should describe its own:
 
 - compile image
-- runtime image
 - compile command
 - runtime command
 
-This is preferred over hardcoding runtime assumptions in the service or executor.
+All languages execute in the configured universal runtime image. This avoids maintaining separate runtime pools while keeping compiler toolchains out of the execution sandbox.
 
 ### Pool Strategy
 
-The current `ExecutorSandboxPool` is intentionally simple.
+The current `ExecutorSandboxPool` borrows warm universal sandboxes and returns them after reset. A container restart on release provides a practical cleanup boundary for temporary filesystem state and stray runtime processes.
 
-Today:
-
-- `Acquire` starts a fresh sandbox
-- `Release` deletes that sandbox
-
-Future behavior:
-
-- `Acquire` borrows a warm sandbox from a pool
-- `Release` resets and returns the sandbox to the pool
-
-The service should not need to care which of those is happening.
+Future hardening should add graceful server shutdown cleanup, failure recovery for lost pool capacity, and durable worker coordination.
 
 ## Summary
 
-YexJudge is currently a synchronous HTTP judge with a much cleaner internal architecture than before: thin server layer, explicit service orchestration, executor abstraction, sandbox handle and pool abstraction, and language-based execution pipelines.
+YexJudge is currently an asynchronous single-process judge with a much cleaner internal architecture than before: thin server layer, submission queueing, background worker processing, explicit service orchestration, executor abstraction, sandbox handle and pool abstraction, and language-based execution pipelines.
 
 The long-term target remains an asynchronous, queue-backed, worker-driven judge with reusable compile environments and reusable runtime sandbox pools. The current refactor is intentionally aimed at making that transition possible without rewriting the core judging logic again.

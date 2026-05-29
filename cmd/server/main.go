@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os/signal"
+	"syscall"
 	"time"
 	"yexjudge/internal/judge"
 	"yexjudge/internal/judge/languages"
@@ -18,7 +20,7 @@ var (
 	submissionQueue *judge.MemorySubmissionQueue
 )
 
-func judgeHandler(w http.ResponseWriter, r *http.Request) {
+func createSubmissionHandler(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 
 	if r.Method != http.MethodPost {
@@ -27,7 +29,6 @@ func judgeHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	job, ok := decodeJudgeJob(w, r)
-
 	if !ok {
 		return
 	}
@@ -67,12 +68,75 @@ func judgeHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Location", "/submissions/"+submission.ID)
 	w.WriteHeader(http.StatusAccepted)
-	json.NewEncoder(w).Encode(response)
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		log.Println("failed to encode submission response:", err)
+	}
+}
 
+func submissionsCollectionHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPost {
+		createSubmissionHandler(w, r)
+		return
+	}
+
+	http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+}
+
+func startWorker(ctx context.Context, workerID int) {
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case submissionID, ok := <-submissionQueue.Channel():
+				if !ok {
+					return
+				}
+
+				submission, ok := submissionStore.Get(submissionID)
+				if !ok {
+					log.Println("worker", workerID, "submission not found in store:", submissionID)
+					continue
+				}
+				if submission.Status != judge.SubmissionQueued {
+					log.Println("worker", workerID, "skipping submission with status:", submissionID, submission.Status)
+					continue
+				}
+				if _, err := judgeService.ProcessSubmission(ctx, submission); err != nil {
+					log.Println("worker", workerID, "failed to process submission:", submissionID, err)
+				}
+			}
+		}
+	}()
+}
+
+func buildSandboxPool(executor judge.Executor, size int) ([]*judge.Sandbox, error) {
+	sandboxes := make([]*judge.Sandbox, 0, size)
+	for i := 0; i < size; i++ {
+		sandbox, err := executor.StartSandbox(context.Background())
+		if err != nil {
+			for _, started := range sandboxes {
+				executor.RemoveSandbox(started)
+			}
+			return nil, err
+		}
+		sandboxes = append(sandboxes, sandbox)
+	}
+
+	return sandboxes, nil
+}
+
+func cleanupSandboxes(executor judge.Executor, sandboxes []*judge.Sandbox) {
+	for _, sandbox := range sandboxes {
+		executor.RemoveSandbox(sandbox)
+	}
 }
 
 func main() {
+	cfg := loadConfig()
+
 	cmdRunner := &runner.DockerRunner{}
 	registry := languages.NewRegistry(
 		languages.Cpp{},
@@ -81,34 +145,76 @@ func main() {
 		languages.Go{},
 		languages.Java{},
 	)
-	queue := judge.NewMemorySubmissionQueue(100)
+
+	queue := judge.NewMemorySubmissionQueue(cfg.queueSize)
 	submissionQueue = queue
 
 	executor := judge.NewDockerExecutor(cmdRunner)
-	pool := judge.NewExecutorSandboxPool(executor)
+
+	sandboxes, err := buildSandboxPool(executor, cfg.sandboxPoolSize)
+	if err != nil {
+		log.Fatal("failed to build sandbox pool:", err)
+	}
+	defer cleanupSandboxes(executor, sandboxes)
+
+	pool := judge.NewExecutorSandboxPool(executor, sandboxes)
+
 	store := judge.NewMemorySubmissionStore()
 	submissionStore = store
 
 	judgeService = judge.NewService(executor, pool, store, registry)
 
-	go func() {
-		for submissionID := range submissionQueue.Channel() {
-			submission, ok := submissionStore.Get(submissionID)
-			if !ok {
-				log.Println("submission not found in store:", submissionID)
-				continue
-			}
+	workerCtx, cancelWorkers := context.WithCancel(context.Background())
+	defer cancelWorkers()
 
-			if _, err := judgeService.ProcessSubmission(context.Background(), submission); err != nil {
-				log.Println("failed to process submission:", submissionID, err)
-			}
+	for i := 1; i <= cfg.workerCount; i++ {
+		startWorker(workerCtx, i)
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", healthHandler)
+	mux.HandleFunc("/judge", createSubmissionHandler)
+	mux.HandleFunc("/submissions", submissionsCollectionHandler)
+	mux.HandleFunc("/submissions/", submissionHandler)
+
+	server := &http.Server{
+		Addr:    ":" + cfg.port,
+		Handler: mux,
+	}
+
+	shutdownDone := make(chan struct{})
+	go func() {
+		sigCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+		defer stop()
+
+		<-sigCtx.Done()
+		log.Println("shutdown signal received")
+
+		cancelWorkers()
+		submissionQueue.Close()
+
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			log.Println("server shutdown error:", err)
 		}
+
+		close(shutdownDone)
 	}()
 
-	http.HandleFunc("/health", healthHandler)
-	http.HandleFunc("/judge", judgeHandler)
-	http.HandleFunc("/submissions/", submissionHandler)
+	log.Printf(
+		"YexJudge server running on :%s with %d workers, queue size %d, sandbox pool size %d",
+		cfg.port,
+		cfg.workerCount,
+		cfg.queueSize,
+		cfg.sandboxPoolSize,
+	)
 
-	log.Println("YexJudge server running on :8080")
-	log.Fatal(http.ListenAndServe(":8080", nil))
+	err = server.ListenAndServe()
+	if err != nil && err != http.ErrServerClosed {
+		log.Fatal(err)
+	}
+
+	<-shutdownDone
 }

@@ -26,10 +26,6 @@ func (Go) CompileCommand() []string {
 	}
 }
 
-func (Go) RuntimeImage() string {
-	return "alpine"
-}
-
 func (Go) RunCommand() []string {
 	return []string{"/workspace/main"}
 }

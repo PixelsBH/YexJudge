@@ -2,6 +2,11 @@ package judge
 
 import "fmt"
 
+const (
+	MaxTimeLimitMs   = 10_000
+	MaxMemoryLimitMb = 512
+)
+
 func ValidateJob(job Job) error {
 	if job.Language == "" {
 		return fmt.Errorf("language is required")
@@ -18,9 +23,15 @@ func ValidateJob(job Job) error {
 	if job.Limits.TimeLimitMs <= 0 {
 		return fmt.Errorf("timeLimitMs must be greater than 0")
 	}
+	if job.Limits.TimeLimitMs > MaxTimeLimitMs {
+		return fmt.Errorf("timeLimitMs must not exceed %d", MaxTimeLimitMs)
+	}
 
 	if job.Limits.MemoryLimitMb <= 0 {
 		return fmt.Errorf("memoryLimitMb must be greater than 0")
+	}
+	if job.Limits.MemoryLimitMb > MaxMemoryLimitMb {
+		return fmt.Errorf("memoryLimitMb must not exceed %d", MaxMemoryLimitMb)
 	}
 
 	if len(job.SourceCode) > 100_000 {

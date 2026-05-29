@@ -48,6 +48,10 @@ type SubmissionResponse struct {
 	Result *Result          `json:"result,omitempty"`
 }
 
+type Sandbox struct {
+	ContainerName string
+}
+
 const (
 	Accepted            Status = "accepted"
 	WrongAnswer         Status = "wrong_answer"

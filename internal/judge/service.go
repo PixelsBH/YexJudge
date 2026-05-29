@@ -90,7 +90,7 @@ func (s *Service) ProcessSubmission(ctx context.Context, submission Submission) 
 		}
 	}
 
-	sandbox, err := s.pool.Acquire(ctx, workspace, submission.Job.Limits, spec)
+	sandbox, err := s.pool.Acquire(ctx, submission.Job.Limits)
 	if err != nil {
 		submission.Status = SubmissionFailed
 		if updateErr := s.store.Update(submission); updateErr != nil {
@@ -99,6 +99,14 @@ func (s *Service) ProcessSubmission(ctx context.Context, submission Submission) 
 		return Result{}, err
 	}
 	defer s.pool.Release(sandbox)
+
+	if err := s.executor.PrepareSandbox(ctx, sandbox, workspace); err != nil {
+		submission.Status = SubmissionFailed
+		if updateErr := s.store.Update(submission); updateErr != nil {
+			return Result{}, updateErr
+		}
+		return Result{}, err
+	}
 
 	result, err := runTestCases(ctx, s.executor, sandbox, submission.Job, spec)
 	if err != nil {

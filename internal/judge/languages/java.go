@@ -15,7 +15,7 @@ func (Java) NeedsCompile() bool {
 }
 
 func (Java) CompileImage() string {
-	return "eclipse-temurin:21-alpine"
+	return "eclipse-temurin:17-jdk"
 }
 
 func (Java) CompileCommand() []string {
@@ -23,10 +23,6 @@ func (Java) CompileCommand() []string {
 		"javac",
 		"/workspace/Main.java",
 	}
-}
-
-func (Java) RuntimeImage() string {
-	return "eclipse-temurin:21-alpine"
 }
 
 func (Java) RunCommand() []string {

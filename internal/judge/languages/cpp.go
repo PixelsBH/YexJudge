@@ -31,10 +31,6 @@ func (Cpp) CompileCommand() []string {
 	}
 }
 
-func (Cpp) RuntimeImage() string {
-	return "alpine"
-}
-
 func (Cpp) RunCommand() []string {
 	return []string{"/workspace/main"}
 }

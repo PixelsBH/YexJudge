@@ -22,10 +22,6 @@ func (Python) CompileCommand() []string {
 	return nil
 }
 
-func (Python) RuntimeImage() string {
-	return "python:3.12-alpine"
-}
-
 func (Python) RunCommand() []string {
 	return []string{"python3", "/workspace/main.py"}
 }

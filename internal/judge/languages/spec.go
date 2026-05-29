@@ -6,6 +6,5 @@ type Spec interface {
 	NeedsCompile() bool
 	CompileImage() string
 	CompileCommand() []string
-	RuntimeImage() string
 	RunCommand() []string
 }
