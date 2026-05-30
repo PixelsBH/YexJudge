@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -9,6 +10,8 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+
+	_ "github.com/jackc/pgx/v5/stdlib"
 	"yexjudge/internal/judge"
 	"yexjudge/internal/judge/languages"
 	"yexjudge/internal/runner"
@@ -17,7 +20,7 @@ import (
 var (
 	judgeService    *judge.Service
 	submissionStore judge.SubmissionStore
-	submissionQueue *judge.MemorySubmissionQueue
+	submissionQueue judge.SubmissionQueue
 )
 
 func createSubmissionHandler(w http.ResponseWriter, r *http.Request) {
@@ -90,23 +93,29 @@ func startWorker(ctx context.Context, workerID int) {
 			select {
 			case <-ctx.Done():
 				return
-			case submissionID, ok := <-submissionQueue.Channel():
-				if !ok {
+			default:
+			}
+
+			submissionID, err := submissionQueue.Dequeue(ctx)
+			if err != nil {
+				if ctx.Err() != nil {
 					return
 				}
+				log.Println("worker", workerID, "failed to dequeue submission:", err)
+				continue
+			}
 
-				submission, ok := submissionStore.Get(submissionID)
-				if !ok {
-					log.Println("worker", workerID, "submission not found in store:", submissionID)
-					continue
-				}
-				if submission.Status != judge.SubmissionQueued {
-					log.Println("worker", workerID, "skipping submission with status:", submissionID, submission.Status)
-					continue
-				}
-				if _, err := judgeService.ProcessSubmission(ctx, submission); err != nil {
-					log.Println("worker", workerID, "failed to process submission:", submissionID, err)
-				}
+			submission, ok := submissionStore.Get(submissionID)
+			if !ok {
+				log.Println("worker", workerID, "submission not found in store:", submissionID)
+				continue
+			}
+			if submission.Status != judge.SubmissionQueued && submission.Status != judge.SubmissionRunning {
+				log.Println("worker", workerID, "skipping submission with status:", submissionID, submission.Status)
+				continue
+			}
+			if _, err := judgeService.ProcessSubmission(ctx, submission); err != nil {
+				log.Println("worker", workerID, "failed to process submission:", submissionID, err)
 			}
 		}
 	}()
@@ -136,7 +145,6 @@ func cleanupSandboxes(executor judge.Executor, sandboxes []*judge.Sandbox) {
 
 func main() {
 	cfg := loadConfig()
-
 	cmdRunner := &runner.DockerRunner{}
 	registry := languages.NewRegistry(
 		languages.Cpp{},
@@ -145,9 +153,6 @@ func main() {
 		languages.Go{},
 		languages.Java{},
 	)
-
-	queue := judge.NewMemorySubmissionQueue(cfg.queueSize)
-	submissionQueue = queue
 
 	executor := judge.NewDockerExecutor(cmdRunner)
 
@@ -159,8 +164,14 @@ func main() {
 
 	pool := judge.NewExecutorSandboxPool(executor, sandboxes)
 
-	store := judge.NewMemorySubmissionStore()
+	store, queue, cleanup, err := buildPersistence(cfg)
+	if err != nil {
+		log.Fatal("failed to build persistence:", err)
+	}
+	defer cleanup()
+
 	submissionStore = store
+	submissionQueue = queue
 
 	judgeService = judge.NewService(executor, pool, store, registry)
 
@@ -217,4 +228,36 @@ func main() {
 	}
 
 	<-shutdownDone
+}
+
+func buildPersistence(cfg config) (judge.SubmissionStore, judge.SubmissionQueue, func(), error) {
+	if cfg.databaseURL == "" {
+		log.Println("DATABASE_URL not set, using in-memory store and queue")
+		store := judge.NewMemorySubmissionStore()
+		queue := judge.NewMemorySubmissionQueue(cfg.queueSize)
+		return store, queue, func() {}, nil
+	}
+
+	db, err := sql.Open("pgx", cfg.databaseURL)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	if err := db.Ping(); err != nil {
+		db.Close()
+		return nil, nil, nil, err
+	}
+
+	log.Println("using Postgres store and queue")
+
+	store := judge.NewPostgresSubmissionStore(db)
+	queue := judge.NewPostgresSubmissionQueue(db, cfg.queuePoll)
+
+	cleanup := func() {
+		if err := db.Close(); err != nil {
+			log.Println("failed to close database:", err)
+		}
+	}
+
+	return store, queue, cleanup, nil
 }

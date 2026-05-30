@@ -4,6 +4,7 @@ import (
 	"log"
 	"os"
 	"strconv"
+	"time"
 )
 
 const (
@@ -11,6 +12,7 @@ const (
 	defaultWorkerCount     = 4
 	defaultQueueSize       = 100
 	defaultSandboxPoolSize = 4
+	defaultQueuePollMs     = 500
 )
 
 type config struct {
@@ -18,6 +20,8 @@ type config struct {
 	workerCount     int
 	queueSize       int
 	sandboxPoolSize int
+	databaseURL     string
+	queuePoll       time.Duration
 }
 
 func loadConfig() config {
@@ -26,6 +30,8 @@ func loadConfig() config {
 		workerCount:     getEnvInt("WORKER_COUNT", defaultWorkerCount),
 		queueSize:       getEnvInt("QUEUE_SIZE", defaultQueueSize),
 		sandboxPoolSize: getEnvInt("SANDBOX_POOL_SIZE", defaultSandboxPoolSize),
+		databaseURL:     getEnv("DATABASE_URL", ""),
+		queuePoll:       time.Duration(getEnvInt("QUEUE_POLL_INTERVAL_MS", defaultQueuePollMs)) * time.Millisecond,
 	}
 }
 

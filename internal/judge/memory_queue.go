@@ -1,12 +1,14 @@
 package judge
 
 import (
+	"context"
 	"fmt"
 	"sync"
 )
 
 type SubmissionQueue interface {
 	Enqueue(submissionID string) error
+	Dequeue(ctx context.Context) (string, error)
 	Close()
 }
 
@@ -40,6 +42,18 @@ func (q *MemorySubmissionQueue) Enqueue(submissionID string) error {
 
 func (q *MemorySubmissionQueue) Channel() <-chan string {
 	return q.ch
+}
+
+func (q *MemorySubmissionQueue) Dequeue(ctx context.Context) (string, error) {
+	select {
+	case <-ctx.Done():
+		return "", ctx.Err()
+	case submissionID, ok := <-q.ch:
+		if !ok {
+			return "", fmt.Errorf("submission queue is closed")
+		}
+		return submissionID, nil
+	}
 }
 
 func (q *MemorySubmissionQueue) Close() {
