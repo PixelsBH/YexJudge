@@ -1,9 +1,25 @@
 package judge
 
+import "encoding/json"
+
 type TestCase struct {
-	ID             int    `json:"id"`
-	Input          string `json:"input"`
-	ExpectedOutput string `json:"expectedOutput"`
+	ID             int               `json:"id"`
+	Input          string            `json:"input,omitempty"`
+	ExpectedOutput string            `json:"expectedOutput,omitempty"`
+	ActualOutput   string            `json:"actualOutput,omitempty"`
+	Args           []json.RawMessage `json:"args,omitempty"`
+	Expected       json.RawMessage   `json:"expected,omitempty"`
+}
+
+type FunctionParam struct {
+	Name string `json:"name"`
+	Type string `json:"type"`
+}
+
+type FunctionSpec struct {
+	Name       string          `json:"name"`
+	ReturnType string          `json:"returnType"`
+	Params     []FunctionParam `json:"params"`
 }
 
 type Limits struct {
@@ -12,10 +28,11 @@ type Limits struct {
 }
 
 type Job struct {
-	Language   string     `json:"language"`
-	SourceCode string     `json:"sourceCode"`
-	TestCases  []TestCase `json:"testCases"`
-	Limits     Limits     `json:"limits"`
+	Language   string        `json:"language"`
+	SourceCode string        `json:"sourceCode"`
+	Function   *FunctionSpec `json:"function,omitempty"`
+	TestCases  []TestCase    `json:"testCases"`
+	Limits     Limits        `json:"limits"`
 }
 
 type Status string
@@ -28,6 +45,14 @@ type Result struct {
 	MemoryMb       int       `json:"memoryMb,omitempty"`
 	FailedTestCase *TestCase `json:"failedTestCase,omitempty"`
 	ErrorMessage   string    `json:"errorMessage,omitempty"`
+}
+
+type RunOutput struct {
+	Status       Status `json:"status"`
+	Output       string `json:"output,omitempty"`
+	ErrorOutput  string `json:"errorOutput,omitempty"`
+	ErrorMessage string `json:"errorMessage,omitempty"`
+	RuntimeMs    int    `json:"runtimeMs,omitempty"`
 }
 
 type Submission struct {

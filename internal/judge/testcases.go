@@ -2,6 +2,8 @@ package judge
 
 import (
 	"context"
+	"fmt"
+	"strconv"
 	"strings"
 	"time"
 	"yexjudge/internal/judge/languages"
@@ -21,7 +23,7 @@ func runTestCases(
 		runRes, err := executor.RunTestCase(
 			ctxRun,
 			sandbox,
-			tc.Input,
+			testCaseInput(job, tc),
 			spec,
 		)
 
@@ -34,25 +36,29 @@ func runTestCases(
 		if runRes.TimedOut {
 			return Result{
 				Status:         TimeLimitExceeded,
-				FailedTestCase: &tc,
+				FailedTestCase: failedTestCase(tc, runRes.Stdout),
 			}, nil
 		}
 
 		if runRes.ExitCode != 0 {
 			return Result{
 				Status:         RuntimeError,
-				FailedTestCase: &tc,
+				FailedTestCase: failedTestCase(tc, runRes.Stdout),
 				ErrorMessage:   runRes.Stderr,
 			}, nil
 		}
 
 		output := strings.TrimSpace(runRes.Stdout)
-		expected := strings.TrimSpace(tc.ExpectedOutput)
+		expected, err := testCaseExpectedOutput(job, tc)
+		if err != nil {
+			return Result{}, err
+		}
+		expected = strings.TrimSpace(expected)
 
 		if output != expected {
 			return Result{
 				Status:         WrongAnswer,
-				FailedTestCase: &tc,
+				FailedTestCase: failedTestCase(tc, output),
 			}, nil
 		}
 
@@ -66,4 +72,30 @@ func runTestCases(
 		Status:    Accepted,
 		RuntimeMs: maxRuntimeMs,
 	}, nil
+}
+
+func failedTestCase(tc TestCase, actualOutput string) *TestCase {
+	tc.ActualOutput = strings.TrimSpace(actualOutput)
+	return &tc
+}
+
+func testCaseInput(job Job, tc TestCase) string {
+	if job.Function != nil {
+		return strconv.Itoa(tc.ID)
+	}
+
+	return tc.Input
+}
+
+func testCaseExpectedOutput(job Job, tc TestCase) (string, error) {
+	if job.Function == nil {
+		return tc.ExpectedOutput, nil
+	}
+
+	expected, err := normalizeExpectedJSON(tc.Expected)
+	if err != nil {
+		return "", fmt.Errorf("test case %d expected: %w", tc.ID, err)
+	}
+
+	return expected, nil
 }

@@ -21,6 +21,7 @@ var (
 	judgeService    *judge.Service
 	submissionStore judge.SubmissionStore
 	submissionQueue judge.SubmissionQueue
+	submitTimeout   = 10 * time.Second
 )
 
 func createSubmissionHandler(w http.ResponseWriter, r *http.Request) {
@@ -41,27 +42,10 @@ func createSubmissionHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	submission := judge.Submission{
-		ID:     fmt.Sprintf("%d", time.Now().UnixNano()),
-		Job:    job,
-		Status: judge.SubmissionQueued,
-	}
-
-	if err := submissionStore.Save(submission); err != nil {
+	submission, err := createAndQueueSubmission(job)
+	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
-		log.Println("failed to save submission:", err)
-		return
-	}
-
-	if err := submissionQueue.Enqueue(submission.ID); err != nil {
-		submission.Status = judge.SubmissionFailed
-		if updateErr := submissionStore.Update(submission); updateErr != nil {
-			http.Error(w, "internal error", http.StatusInternalServerError)
-			log.Println("failed to mark submission as failed after enqueue error:", updateErr)
-			return
-		}
-		http.Error(w, "submission queue is full", http.StatusServiceUnavailable)
-		log.Println("failed to enqueue submission:", err)
+		log.Println("failed to create submission:", err)
 		return
 	}
 
@@ -76,6 +60,28 @@ func createSubmissionHandler(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewEncoder(w).Encode(response); err != nil {
 		log.Println("failed to encode submission response:", err)
 	}
+}
+
+func createAndQueueSubmission(job judge.Job) (judge.Submission, error) {
+	submission := judge.Submission{
+		ID:     fmt.Sprintf("%d", time.Now().UnixNano()),
+		Job:    job,
+		Status: judge.SubmissionQueued,
+	}
+
+	if err := submissionStore.Save(submission); err != nil {
+		return judge.Submission{}, err
+	}
+
+	if err := submissionQueue.Enqueue(submission.ID); err != nil {
+		submission.Status = judge.SubmissionFailed
+		if updateErr := submissionStore.Update(submission); updateErr != nil {
+			return judge.Submission{}, fmt.Errorf("enqueue failed: %v; failed to update submission: %w", err, updateErr)
+		}
+		return judge.Submission{}, err
+	}
+
+	return submission, nil
 }
 
 func submissionsCollectionHandler(w http.ResponseWriter, r *http.Request) {
@@ -145,6 +151,7 @@ func cleanupSandboxes(executor judge.Executor, sandboxes []*judge.Sandbox) {
 
 func main() {
 	cfg := loadConfig()
+	submitTimeout = cfg.submitTimeout
 	cmdRunner := &runner.DockerRunner{}
 	registry := languages.NewRegistry(
 		languages.Cpp{},
@@ -184,9 +191,11 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", healthHandler)
+	mux.HandleFunc("/run", runHandler)
 	mux.HandleFunc("/judge", createSubmissionHandler)
 	mux.HandleFunc("/submissions", submissionsCollectionHandler)
 	mux.HandleFunc("/submissions/", submissionHandler)
+	mux.HandleFunc("/submit", submitHandler)
 
 	server := &http.Server{
 		Addr:    ":" + cfg.port,
@@ -215,10 +224,9 @@ func main() {
 	}()
 
 	log.Printf(
-		"YexJudge server running on :%s with %d workers, queue size %d, sandbox pool size %d",
+		"YexJudge server running on :%s with %d workers, sandbox pool size %d",
 		cfg.port,
 		cfg.workerCount,
-		cfg.queueSize,
 		cfg.sandboxPoolSize,
 	)
 
@@ -232,10 +240,7 @@ func main() {
 
 func buildPersistence(cfg config) (judge.SubmissionStore, judge.SubmissionQueue, func(), error) {
 	if cfg.databaseURL == "" {
-		log.Println("DATABASE_URL not set, using in-memory store and queue")
-		store := judge.NewMemorySubmissionStore()
-		queue := judge.NewMemorySubmissionQueue(cfg.queueSize)
-		return store, queue, func() {}, nil
+		return nil, nil, nil, fmt.Errorf("DATABASE_URL is required")
 	}
 
 	db, err := sql.Open("pgx", cfg.databaseURL)

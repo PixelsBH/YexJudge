@@ -10,28 +10,28 @@ import (
 const (
 	defaultPort            = "8080"
 	defaultWorkerCount     = 4
-	defaultQueueSize       = 100
 	defaultSandboxPoolSize = 4
 	defaultQueuePollMs     = 500
+	defaultSubmitTimeoutMs = 10000
 )
 
 type config struct {
 	port            string
 	workerCount     int
-	queueSize       int
 	sandboxPoolSize int
 	databaseURL     string
 	queuePoll       time.Duration
+	submitTimeout   time.Duration
 }
 
 func loadConfig() config {
 	return config{
 		port:            getEnv("PORT", defaultPort),
 		workerCount:     getEnvInt("WORKER_COUNT", defaultWorkerCount),
-		queueSize:       getEnvInt("QUEUE_SIZE", defaultQueueSize),
 		sandboxPoolSize: getEnvInt("SANDBOX_POOL_SIZE", defaultSandboxPoolSize),
 		databaseURL:     getEnv("DATABASE_URL", ""),
 		queuePoll:       time.Duration(getEnvInt("QUEUE_POLL_INTERVAL_MS", defaultQueuePollMs)) * time.Millisecond,
+		submitTimeout:   time.Duration(getEnvInt("SUBMIT_TIMEOUT_MS", defaultSubmitTimeoutMs)) * time.Millisecond,
 	}
 }
 

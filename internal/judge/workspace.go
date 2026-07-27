@@ -1,6 +1,7 @@
 package judge
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"yexjudge/internal/judge/languages"
@@ -13,8 +14,22 @@ func createWorkspace(job Job, spec languages.Spec) (string, error) {
 	}
 
 	sourcePath := filepath.Join(workspace, spec.SourceFileName())
+	sourceCode := job.SourceCode
 
-	if err := os.WriteFile(sourcePath, []byte(job.SourceCode), 0644); err != nil {
+	if job.Function != nil {
+		if spec.Name() != "cpp" {
+			os.RemoveAll(workspace)
+			return "", fmt.Errorf("function mode currently supports cpp only")
+		}
+
+		sourceCode, err = buildCppFunctionHarness(job)
+		if err != nil {
+			os.RemoveAll(workspace)
+			return "", err
+		}
+	}
+
+	if err := os.WriteFile(sourcePath, []byte(sourceCode), 0644); err != nil {
 		os.RemoveAll(workspace)
 		return "", err
 	}

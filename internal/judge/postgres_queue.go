@@ -8,6 +8,12 @@ import (
 	"time"
 )
 
+type SubmissionQueue interface {
+	Enqueue(submissionID string) error
+	Dequeue(ctx context.Context) (string, error)
+	Close()
+}
+
 type PostgresSubmissionQueue struct {
 	db           *sql.DB
 	pollInterval time.Duration

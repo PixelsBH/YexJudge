@@ -3,6 +3,8 @@ package judge
 import (
 	"context"
 	"os"
+	"strings"
+	"time"
 	"yexjudge/internal/judge/languages"
 )
 
@@ -20,6 +22,76 @@ func NewService(executor Executor, pool SandboxPool, store SubmissionStore, regi
 		store:    store,
 		registry: registry,
 	}
+}
+
+func (s *Service) RunCode(ctx context.Context, job Job) (RunOutput, error) {
+	if job.Function != nil {
+		return RunOutput{
+			Status:       ValidationError,
+			ErrorMessage: "function mode is not supported by /run; use /submit",
+		}, nil
+	}
+
+	spec, ok := s.registry.Get(job.Language)
+	if !ok {
+		return RunOutput{
+			Status:       ValidationError,
+			ErrorMessage: "unsupported language",
+		}, nil
+	}
+
+	workspace, err := createWorkspace(job, spec)
+	if err != nil {
+		return RunOutput{}, err
+	}
+	defer os.RemoveAll(workspace)
+
+	if spec.NeedsCompile() {
+		compileRes, err := s.executor.Compile(ctx, workspace, spec)
+		if err != nil {
+			return RunOutput{}, err
+		}
+		if compileRes.ExitCode != 0 {
+			return RunOutput{
+				Status:       CompilationError,
+				ErrorOutput:  compileRes.Stderr,
+				ErrorMessage: compileRes.Stderr,
+			}, nil
+		}
+	}
+
+	sandbox, err := s.pool.Acquire(ctx, job.Limits)
+	if err != nil {
+		return RunOutput{}, err
+	}
+	defer s.pool.Release(sandbox)
+
+	if err := s.executor.PrepareSandbox(ctx, sandbox, workspace); err != nil {
+		return RunOutput{}, err
+	}
+
+	ctxRun, cancelRun := context.WithTimeout(ctx, time.Duration(job.Limits.TimeLimitMs)*time.Millisecond)
+	defer cancelRun()
+
+	runRes, err := s.executor.RunTestCase(ctxRun, sandbox, "", spec)
+	if err != nil {
+		return RunOutput{}, err
+	}
+
+	output := RunOutput{
+		Status:    Accepted,
+		Output:    strings.TrimSpace(runRes.Stdout),
+		RuntimeMs: int(runRes.TimeUsed.Milliseconds()),
+	}
+	if runRes.TimedOut {
+		output.Status = TimeLimitExceeded
+	} else if runRes.ExitCode != 0 {
+		output.Status = RuntimeError
+		output.ErrorOutput = strings.TrimSpace(runRes.Stderr)
+		output.ErrorMessage = output.ErrorOutput
+	}
+
+	return output, nil
 }
 
 func (s *Service) ProcessSubmission(ctx context.Context, submission Submission) (Result, error) {

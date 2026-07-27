@@ -16,10 +16,11 @@ The current refactor has already established the core components needed for:
 - worker pools
 - queue-backed asynchronous execution
 - stronger API-side validation
+- a first version of LeetCode-style C++ function-mode submissions
 
 ## Current Architecture
 
-Today, a submission is accepted through HTTP, stored in memory, pushed into an in-memory queue, and processed by an in-process worker pool. Workers borrow pre-created containers from one universal runtime sandbox pool.
+Today, a submission is accepted through HTTP, stored in Postgres, claimed through a Postgres-backed queue, and processed by an in-process worker pool. Workers borrow pre-created containers from one universal runtime sandbox pool.
 
 The code is now split into these layers:
 
@@ -30,8 +31,9 @@ The code is now split into these layers:
 - sandbox lifecycle abstraction in [`internal/judge/pool.go`](/home/pixels/Documents/Projects/YexJudge/internal/judge/pool.go)
 - test case loop and verdicting in [`internal/judge/testcases.go`](/home/pixels/Documents/Projects/YexJudge/internal/judge/testcases.go)
 - language-specific behavior in [`internal/judge/languages/spec.go`](/home/pixels/Documents/Projects/YexJudge/internal/judge/languages/spec.go)
-- in-memory submission store in [`internal/judge/memory_store.go`](/home/pixels/Documents/Projects/YexJudge/internal/judge/memory_store.go)
-- in-memory submission queue in [`internal/judge/memory_queue.go`](/home/pixels/Documents/Projects/YexJudge/internal/judge/memory_queue.go)
+- C++ function harness generation in [`internal/judge/cpp_function_harness.go`](/home/pixels/Documents/Projects/YexJudge/internal/judge/cpp_function_harness.go)
+- Postgres submission store in [`internal/judge/postgres_store.go`](/home/pixels/Documents/Projects/YexJudge/internal/judge/postgres_store.go)
+- Postgres submission queue in [`internal/judge/postgres_queue.go`](/home/pixels/Documents/Projects/YexJudge/internal/judge/postgres_queue.go)
 
 ### Current Flow
 
@@ -41,7 +43,7 @@ flowchart TD
     Server --> Decode[Decode Job]
     Decode --> Validate[Validate Payload]
     Validate --> Store[Save Submission as queued]
-    Store --> Queue[In-memory Submission Queue]
+    Store --> Queue[Postgres-backed Submission Queue]
     Queue --> Worker[In-process Worker Pool]
     Worker --> Service[Judge Service]
     Service --> Registry[Language Registry]
@@ -75,6 +77,8 @@ The HTTP layer is intentionally thin.
 Responsibilities:
 
 - receive `POST /submissions`
+- receive `POST /submit` as a bounded synchronous convenience endpoint
+- receive `POST /run` for one-off sandboxed execution without persistence, test-case comparison, or user-provided stdin
 - receive `GET /submissions/{id}`
 - decode request JSON
 - enforce request-size limit
@@ -82,6 +86,8 @@ Responsibilities:
 - create and store queued submissions
 - enqueue accepted submissions
 - return submission acceptance metadata
+- optionally wait for a bounded period and return the final result
+- execute one raw-stdin request synchronously through the existing compiler and sandbox infrastructure
 - return stored submission status and result
 
 This layer should not contain compilation or execution logic.
@@ -96,6 +102,7 @@ Responsibilities:
 - validate jobs defensively
 - resolve the language spec
 - create the workspace
+- generate a C++ function harness when a job uses LeetCode-style function mode
 - compile if the language requires compilation
 - acquire a sandbox
 - run all test cases
@@ -140,15 +147,17 @@ The custom runtime image is based on Debian slim and includes Python and a Java 
 
 #### 5. Submission Store and Queue
 
-The current async path is backed by in-memory infrastructure.
+The current async path can be backed by Postgres.
 
 Current behavior:
 
-- submissions are stored in memory
-- submission IDs are pushed into an in-memory buffered queue
-- a background goroutine consumes the queue and processes submissions
+- submissions are stored in the `submissions` table
+- job payloads and results are stored as JSONB
+- workers claim queued submissions with `FOR UPDATE SKIP LOCKED`
+- claiming changes a submission from `queued` to `running`
+- completed submissions are updated to `finished` with a result payload
 
-This is enough to support async behavior during development, but it is not durable and is not the final production design.
+`DATABASE_URL` is required so the server always uses the durable path.
 
 #### 6. Language Registry
 
@@ -189,12 +198,10 @@ The shared `yexjudge-runtime:latest` image must be built locally before starting
 
 ### Current Limitations
 
-- queue and submission state are only in memory
-- worker count is currently configured in code
 - a fresh compile container is still created per compiled submission
-- there is no durable queue yet
 - there is no worker recovery or retry model yet
-- submissions are lost on process restart
+- submissions already claimed as `running` are not recovered after a crash yet
+- Postgres schema changes are applied manually through `db/submissions.sql`
 
 ## Target Architecture
 
@@ -310,7 +317,7 @@ This avoids:
 
 ## Next Work Order
 
-The core architecture is already in place. The remaining work should focus on proving correctness first, then making the queue and worker model durable, then optimizing compilation.
+The core architecture is already in place. The remaining work should focus on recovery, hardening, observability, and compile performance.
 
 ### 1. End-to-End Runtime Verification
 
@@ -321,19 +328,19 @@ Tasks:
 - build `yexjudge-runtime:latest`
 - start the server locally
 - submit working and failing programs for C, C++, Python, Go, and Java
-- verify `POST /judge` returns `202 Accepted`
+- verify `POST /submissions` returns `202 Accepted`
 - verify `GET /submissions/{id}` transitions through `queued`, `running`, and `finished`
 - verify accepted, wrong answer, runtime error, compilation error, and timeout verdicts
 
 Reason:
 
-The reusable runtime sandbox pool is now the most important execution path. It should be proven before replacing storage or queue infrastructure.
+The reusable runtime sandbox pool is now the most important execution path and should stay covered as other infrastructure changes land.
 
 ### 2. Fix Any Runtime Pool Issues Found During Testing
 
 Tasks:
 
-- confirm `docker cp` correctly stages source files and compiled artifacts into borrowed sandboxes
+- confirm tar-based staging correctly stages source files and compiled artifacts into borrowed sandboxes
 - confirm sandbox restart clears `/workspace` and `/tmp`
 - confirm repeated submissions do not leak files or processes between runs
 - confirm memory limits are applied correctly before execution
@@ -343,7 +350,7 @@ Reason:
 
 Reusable sandboxes are a major performance feature, but they must be clean between submissions.
 
-### 3. Move to Final API Shape
+### 3. Keep Final API Shape
 
 Target routes:
 
@@ -356,31 +363,30 @@ Current compatibility route:
 
 Tasks:
 
-- add `POST /submissions` using the same handler behavior as `POST /judge`
 - keep `/judge` temporarily as an alias if useful
-- eventually treat `/submissions` as the primary API
+- keep `/submissions` as the primary API
 
 Reason:
 
 The judge is now submission-oriented and asynchronous. The API should reflect that.
 
-### 4. Add Durable Submission Store and Queue
+### 4. Harden Durable Submission Store and Queue
 
-Recommended first durable backend:
+Current durable backend:
 
 - Postgres-only
 
 Tasks:
 
-- create a `submissions` table
-- store job payload, status, result, timestamps, and error metadata
-- replace `MemorySubmissionStore` with a Postgres implementation
-- replace the in-memory queue with database-backed claiming of queued submissions
-- use atomic `queued -> running` claims so multiple workers cannot process the same submission
+- keep `db/submissions.sql` in sync with code
+- add schema migration tooling later
+- add more useful error metadata for infrastructure failures
+- add tests around Postgres store and queue behavior
+- keep atomic `queued -> running` claims as the worker coordination boundary
 
 Reason:
 
-The current in-memory store and queue lose all jobs and results on restart. Postgres gives durable storage and a good enough queue for this project stage without adding Redis.
+Postgres now gives durable storage and a good enough queue for this project stage without adding Redis. The remaining work is hardening and recovery, not replacing the basic storage path.
 
 ### 5. Add Worker Recovery and Retry Rules
 
@@ -396,7 +402,33 @@ Reason:
 
 Durable queueing is incomplete without recovery. A worker crash should not leave submissions stuck forever.
 
-### 6. Harden Runtime Sandbox Lifecycle
+### 6. Expand LeetCode-Style Function Harnesses
+
+Tasks:
+
+- support richer LeetCode-style payloads beyond simple primitive and one-dimensional vector arguments
+- add hidden drivers for linked lists, trees, graphs, hash maps, and cache-style problems
+- encode problem-specific input/output adapters so the judge can invoke the user code the way LeetCode does
+- keep stdin-style submissions available for problems that still fit that model better
+
+Reason:
+
+The current function mode proves the approach, but real platform coverage needs reusable drivers and serializers for the common data structures used in judge problems.
+
+### 7. Make Worker and Sandbox Capacity Adaptive
+
+Tasks:
+
+- scale worker count based on queue depth, job wait time, or recent throughput
+- scale warm sandbox pool size based on active load and available memory
+- add minimum and maximum bounds so autoscaling stays predictable
+- define a simple policy first, then refine it with metrics after observing real traffic
+
+Reason:
+
+Fixed worker and sandbox counts are fine for local development, but an actual judge benefits from adapting capacity to bursty submission load.
+
+### 8. Harden Runtime Sandbox Lifecycle
 
 Tasks:
 
@@ -409,7 +441,7 @@ Reason:
 
 The runtime pool is central to performance. It needs predictable lifecycle behavior before production use.
 
-### 7. Harden Compilation
+### 9. Harden Compilation
 
 Tasks:
 
@@ -422,7 +454,7 @@ Reason:
 
 Compilation still starts fresh containers per compiled submission. Reusable compile containers can improve latency later, but compile sandbox hardening is more important first.
 
-### 8. Add Focused Tests and Observability
+### 10. Add Focused Tests and Observability
 
 Tasks:
 
@@ -436,7 +468,7 @@ Reason:
 
 The project is now complex enough that small regressions can hide in lifecycle behavior.
 
-### 9. Consider Reusable Compile Infrastructure
+### 11. Consider Reusable Compile Infrastructure
 
 Only do this after the runtime pool, durable store, and worker recovery are stable.
 
@@ -471,6 +503,9 @@ Each language should describe its own:
 - runtime command
 
 All languages execute in the configured universal runtime image. This avoids maintaining separate runtime pools while keeping compiler toolchains out of the execution sandbox.
+
+C++ also supports a LeetCode-style function mode. In that mode, the request includes function metadata such as function name, return type, and parameter types. The judge generates a hidden C++ driver that constructs each test case, calls `Solution.<functionName>`, serializes the return value, and then uses the normal verdict comparison path.
+The current implementation supports that path for C++ only, and it is intentionally the first step toward broader driver-based problem formats.
 
 ### Pool Strategy
 

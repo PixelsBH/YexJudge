@@ -5,6 +5,12 @@ import (
 	"encoding/json"
 )
 
+type SubmissionStore interface {
+	Save(sub Submission) error
+	Get(id string) (Submission, bool)
+	Update(sub Submission) error
+}
+
 type PostgresSubmissionStore struct {
 	db *sql.DB
 }
@@ -45,7 +51,7 @@ func (s *PostgresSubmissionStore) Get(id string) (Submission, bool) {
 
 	var sub Submission
 	var jobJSON []byte
-	var resultJSON []byte
+	var resultJSON sql.NullString
 
 	err := row.Scan(&sub.ID, &sub.Status, &jobJSON, &resultJSON)
 	if err == sql.ErrNoRows {
@@ -59,9 +65,9 @@ func (s *PostgresSubmissionStore) Get(id string) (Submission, bool) {
 		return Submission{}, false
 	}
 
-	if len(resultJSON) > 0 {
+	if resultJSON.Valid {
 		var result Result
-		if err := json.Unmarshal(resultJSON, &result); err != nil {
+		if err := json.Unmarshal([]byte(resultJSON.String), &result); err != nil {
 			return Submission{}, false
 		}
 		sub.Result = &result
