@@ -16,13 +16,17 @@ func createWorkspace(job Job, spec languages.Spec) (string, error) {
 	sourcePath := filepath.Join(workspace, spec.SourceFileName())
 	sourceCode := job.SourceCode
 
-	if job.Function != nil {
+	if job.Function != nil || job.Class != nil {
 		if spec.Name() != "cpp" {
 			os.RemoveAll(workspace)
-			return "", fmt.Errorf("function mode currently supports cpp only")
+			return "", fmt.Errorf("driver modes currently support cpp only")
 		}
 
-		sourceCode, err = buildCppFunctionHarness(job)
+		if job.Function != nil {
+			sourceCode, err = buildCppFunctionHarness(job)
+		} else {
+			sourceCode, err = buildCppClassHarness(job)
+		}
 		if err != nil {
 			os.RemoveAll(workspace)
 			return "", err

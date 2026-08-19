@@ -24,16 +24,16 @@ Today, a submission is accepted through HTTP, stored in Postgres, claimed throug
 
 The code is now split into these layers:
 
-- HTTP layer in [`cmd/server/main.go`](/home/pixels/Documents/Projects/YexJudge/cmd/server/main.go)
-- submission retrieval endpoint in [`cmd/server/submissions.go`](/home/pixels/Documents/Projects/YexJudge/cmd/server/submissions.go)
-- judge orchestration in [`internal/judge/service.go`](/home/pixels/Documents/Projects/YexJudge/internal/judge/service.go)
-- execution mechanics in [`internal/judge/executor.go`](/home/pixels/Documents/Projects/YexJudge/internal/judge/executor.go)
-- sandbox lifecycle abstraction in [`internal/judge/pool.go`](/home/pixels/Documents/Projects/YexJudge/internal/judge/pool.go)
-- test case loop and verdicting in [`internal/judge/testcases.go`](/home/pixels/Documents/Projects/YexJudge/internal/judge/testcases.go)
-- language-specific behavior in [`internal/judge/languages/spec.go`](/home/pixels/Documents/Projects/YexJudge/internal/judge/languages/spec.go)
-- C++ function harness generation in [`internal/judge/cpp_function_harness.go`](/home/pixels/Documents/Projects/YexJudge/internal/judge/cpp_function_harness.go)
-- Postgres submission store in [`internal/judge/postgres_store.go`](/home/pixels/Documents/Projects/YexJudge/internal/judge/postgres_store.go)
-- Postgres submission queue in [`internal/judge/postgres_queue.go`](/home/pixels/Documents/Projects/YexJudge/internal/judge/postgres_queue.go)
+- HTTP layer in [`cmd/server/main.go`](cmd/server/main.go)
+- submission retrieval endpoint in [`cmd/server/submissions.go`](cmd/server/submissions.go)
+- judge orchestration in [`internal/judge/service.go`](internal/judge/service.go)
+- execution mechanics in [`internal/judge/executor.go`](internal/judge/executor.go)
+- sandbox lifecycle abstraction in [`internal/judge/pool.go`](internal/judge/pool.go)
+- test case loop and verdicting in [`internal/judge/testcases.go`](internal/judge/testcases.go)
+- language-specific behavior in [`internal/judge/languages/spec.go`](internal/judge/languages/spec.go)
+- C++ function harness generation in [`internal/judge/cpp_function_harness.go`](internal/judge/cpp_function_harness.go)
+- Postgres submission store in [`internal/judge/postgres_store.go`](internal/judge/postgres_store.go)
+- Postgres submission queue in [`internal/judge/postgres_queue.go`](internal/judge/postgres_queue.go)
 
 ### Current Flow
 
@@ -175,13 +175,15 @@ The registry maps a requested language string to the correct language spec. Runt
 
 ### Current Supported Languages
 
-The codebase is structured to support multiple languages through specs. At this stage the intended supported set includes:
+The codebase is structured to support multiple languages through specs. The current stdin/stdout runtime set includes:
 
 - C++
 - C
 - Python
-- Go
+- Go (legacy path; no new backend work planned while removal is evaluated)
 - Java
+
+C++ is the only active target for LeetCode-style Function Mode and future Class Mode work. Python and Java are deferred until the C++ roadmap is complete.
 
 The shared `yexjudge-runtime:latest` image must be built locally before starting the server.
 
@@ -317,170 +319,9 @@ This avoids:
 
 ## Next Work Order
 
-The core architecture is already in place. The remaining work should focus on recovery, hardening, observability, and compile performance.
+The actionable implementation order is maintained in [`plan.md`](plan.md). This architecture document describes system boundaries and target principles; `plan.md` owns sequencing, runtime verification, hardening, recovery, testing, observability, capacity, and compile-performance work.
 
-### 1. End-to-End Runtime Verification
-
-Finish this before adding more architecture.
-
-Tasks:
-
-- build `yexjudge-runtime:latest`
-- start the server locally
-- submit working and failing programs for C, C++, Python, Go, and Java
-- verify `POST /submissions` returns `202 Accepted`
-- verify `GET /submissions/{id}` transitions through `queued`, `running`, and `finished`
-- verify accepted, wrong answer, runtime error, compilation error, and timeout verdicts
-
-Reason:
-
-The reusable runtime sandbox pool is now the most important execution path and should stay covered as other infrastructure changes land.
-
-### 2. Fix Any Runtime Pool Issues Found During Testing
-
-Tasks:
-
-- confirm tar-based staging correctly stages source files and compiled artifacts into borrowed sandboxes
-- confirm sandbox restart clears `/workspace` and `/tmp`
-- confirm repeated submissions do not leak files or processes between runs
-- confirm memory limits are applied correctly before execution
-- confirm the runtime image has every command needed by language specs
-
-Reason:
-
-Reusable sandboxes are a major performance feature, but they must be clean between submissions.
-
-### 3. Keep Final API Shape
-
-Target routes:
-
-- `POST /submissions`
-- `GET /submissions/{id}`
-
-Current compatibility route:
-
-- `POST /judge`
-
-Tasks:
-
-- keep `/judge` temporarily as an alias if useful
-- keep `/submissions` as the primary API
-
-Reason:
-
-The judge is now submission-oriented and asynchronous. The API should reflect that.
-
-### 4. Harden Durable Submission Store and Queue
-
-Current durable backend:
-
-- Postgres-only
-
-Tasks:
-
-- keep `db/submissions.sql` in sync with code
-- add schema migration tooling later
-- add more useful error metadata for infrastructure failures
-- add tests around Postgres store and queue behavior
-- keep atomic `queued -> running` claims as the worker coordination boundary
-
-Reason:
-
-Postgres now gives durable storage and a good enough queue for this project stage without adding Redis. The remaining work is hardening and recovery, not replacing the basic storage path.
-
-### 5. Add Worker Recovery and Retry Rules
-
-Tasks:
-
-- track `created_at`, `updated_at`, and possibly `started_at`
-- detect submissions stuck in `running`
-- define retry limits
-- define when a stuck job becomes `failed`
-- make workers claim jobs with a lease or timeout policy
-
-Reason:
-
-Durable queueing is incomplete without recovery. A worker crash should not leave submissions stuck forever.
-
-### 6. Expand LeetCode-Style Function Harnesses
-
-Tasks:
-
-- support richer LeetCode-style payloads beyond simple primitive and one-dimensional vector arguments
-- add hidden drivers for linked lists, trees, graphs, hash maps, and cache-style problems
-- encode problem-specific input/output adapters so the judge can invoke the user code the way LeetCode does
-- keep stdin-style submissions available for problems that still fit that model better
-
-Reason:
-
-The current function mode proves the approach, but real platform coverage needs reusable drivers and serializers for the common data structures used in judge problems.
-
-### 7. Make Worker and Sandbox Capacity Adaptive
-
-Tasks:
-
-- scale worker count based on queue depth, job wait time, or recent throughput
-- scale warm sandbox pool size based on active load and available memory
-- add minimum and maximum bounds so autoscaling stays predictable
-- define a simple policy first, then refine it with metrics after observing real traffic
-
-Reason:
-
-Fixed worker and sandbox counts are fine for local development, but an actual judge benefits from adapting capacity to bursty submission load.
-
-### 8. Harden Runtime Sandbox Lifecycle
-
-Tasks:
-
-- clean up warm sandbox containers on graceful shutdown
-- replace unhealthy sandboxes automatically
-- expose pool size and available sandbox counts in logs or metrics
-- make worker count and pool size configurable through environment variables
-
-Reason:
-
-The runtime pool is central to performance. It needs predictable lifecycle behavior before production use.
-
-### 9. Harden Compilation
-
-Tasks:
-
-- add CPU, memory, PID, network, and timeout constraints to compile containers
-- cap compiler output size
-- classify compile infrastructure failures separately from user compilation errors
-- consider reusable compile pools after the current one-off compile path is stable
-
-Reason:
-
-Compilation still starts fresh containers per compiled submission. Reusable compile containers can improve latency later, but compile sandbox hardening is more important first.
-
-### 10. Add Focused Tests and Observability
-
-Tasks:
-
-- unit test validation rules
-- unit test verdict mapping in test case evaluation
-- integration test the async submission lifecycle
-- add logs for queue size, worker starts, sandbox acquire/release, and verdicts
-- later add metrics for queue depth, worker busy count, runtime duration, and compile duration
-
-Reason:
-
-The project is now complex enough that small regressions can hide in lifecycle behavior.
-
-### 11. Consider Reusable Compile Infrastructure
-
-Only do this after the runtime pool, durable store, and worker recovery are stable.
-
-Target model:
-
-- compile pools keyed by compile image or toolchain
-- separate from runtime sandboxes
-- reset compile workspace between submissions
-
-Reason:
-
-Compile reuse can reduce latency, but it is more complex and riskier than runtime reuse because compilers process untrusted input and toolchains are larger.
+Keep the documents aligned when the target architecture or public behavior changes.
 
 ## Design Notes
 
@@ -505,7 +346,7 @@ Each language should describe its own:
 All languages execute in the configured universal runtime image. This avoids maintaining separate runtime pools while keeping compiler toolchains out of the execution sandbox.
 
 C++ also supports a LeetCode-style function mode. In that mode, the request includes function metadata such as function name, return type, and parameter types. The judge generates a hidden C++ driver that constructs each test case, calls `Solution.<functionName>`, serializes the return value, and then uses the normal verdict comparison path.
-The current implementation supports that path for C++ only, and it is intentionally the first step toward broader driver-based problem formats.
+The current implementation supports that path for C++ only. It is intentionally the first step toward broader driver-based problem formats, but no other language backend will be added until the C++ custom-type and Class Mode roadmap is complete. Python and Java remain future work; Go is not a planned driver backend and may be removed after a separate compatibility decision.
 
 ### Pool Strategy
 

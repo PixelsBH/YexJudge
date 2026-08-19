@@ -25,10 +25,10 @@ func NewService(executor Executor, pool SandboxPool, store SubmissionStore, regi
 }
 
 func (s *Service) RunCode(ctx context.Context, job Job) (RunOutput, error) {
-	if job.Function != nil {
+	if job.Function != nil || job.Class != nil {
 		return RunOutput{
 			Status:       ValidationError,
-			ErrorMessage: "function mode is not supported by /run; use /submit",
+			ErrorMessage: "driver modes are not supported by /run; use /submit",
 		}, nil
 	}
 

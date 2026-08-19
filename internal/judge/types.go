@@ -1,14 +1,20 @@
 package judge
 
-import "encoding/json"
+import (
+	"encoding/json"
+
+	"yexjudge/internal/judge/harness"
+)
 
 type TestCase struct {
-	ID             int               `json:"id"`
-	Input          string            `json:"input,omitempty"`
-	ExpectedOutput string            `json:"expectedOutput,omitempty"`
-	ActualOutput   string            `json:"actualOutput,omitempty"`
-	Args           []json.RawMessage `json:"args,omitempty"`
-	Expected       json.RawMessage   `json:"expected,omitempty"`
+	ID              int               `json:"id"`
+	Input           string            `json:"input,omitempty"`
+	ExpectedOutput  string            `json:"expectedOutput,omitempty"`
+	ActualOutput    string            `json:"actualOutput,omitempty"`
+	Args            []json.RawMessage `json:"args,omitempty"`
+	Expected        json.RawMessage   `json:"expected,omitempty"`
+	ConstructorArgs []json.RawMessage `json:"constructorArgs,omitempty"`
+	Operations      []OperationCall   `json:"operations,omitempty"`
 }
 
 type FunctionParam struct {
@@ -17,9 +23,45 @@ type FunctionParam struct {
 }
 
 type FunctionSpec struct {
+	Name           string              `json:"name"`
+	ReturnType     string              `json:"returnType"`
+	Params         []FunctionParam     `json:"params"`
+	Observations   []ObservationSpec   `json:"observations,omitempty"`
+	Postconditions []PostconditionSpec `json:"postconditions,omitempty"`
+}
+
+type ClassSpec struct {
+	Name        string               `json:"name"`
+	Constructor ClassConstructorSpec `json:"constructor"`
+	Operations  []ClassOperationSpec `json:"operations"`
+}
+
+type ClassConstructorSpec struct {
+	Params []FunctionParam `json:"params"`
+}
+
+type ClassOperationSpec struct {
 	Name       string          `json:"name"`
 	ReturnType string          `json:"returnType"`
 	Params     []FunctionParam `json:"params"`
+}
+
+type OperationCall struct {
+	Name string            `json:"name"`
+	Args []json.RawMessage `json:"args"`
+}
+
+type ObservationSpec struct {
+	Kind             string `json:"kind"`
+	Parameter        int    `json:"parameter,omitempty"`
+	View             string `json:"view,omitempty"`
+	LengthFromReturn bool   `json:"lengthFromReturn,omitempty"`
+}
+
+type PostconditionSpec struct {
+	Kind          string `json:"kind"`
+	Subject       string `json:"subject"`
+	FromParameter int    `json:"fromParameter,omitempty"`
 }
 
 type Limits struct {
@@ -29,10 +71,28 @@ type Limits struct {
 
 type Job struct {
 	Language   string        `json:"language"`
+	Mode       string        `json:"mode,omitempty"`
 	SourceCode string        `json:"sourceCode"`
 	Function   *FunctionSpec `json:"function,omitempty"`
+	Class      *ClassSpec    `json:"class,omitempty"`
 	TestCases  []TestCase    `json:"testCases"`
 	Limits     Limits        `json:"limits"`
+}
+
+// ExecutionMode preserves the original payload behavior while allowing new
+// clients to select a mode explicitly. Function/class metadata implies its
+// corresponding mode when Mode is omitted; all other jobs default to stdin.
+func (j Job) ExecutionMode() harness.ExecutionMode {
+	if j.Mode != "" {
+		return harness.ExecutionMode(j.Mode)
+	}
+	if j.Function != nil {
+		return harness.ModeFunction
+	}
+	if j.Class != nil {
+		return harness.ModeClass
+	}
+	return harness.ModeStdin
 }
 
 type Status string

@@ -272,8 +272,48 @@ Function mode currently supports C++ and these value types:
 - `vector<double>`
 - `vector<bool>`
 - `vector<string>`
+- `ListNode*`
+- `TreeNode*`
+- `RandomListNode*`
+- `Node*` for random-pointer lists
+- `GraphNode*`
+- `optional<T>` values such as `optional<int>`
+- recursive compositions such as `vector<vector<int>>` and `optional<vector<int>>`
 
 Reference parameters such as `vector<int>&` and `const vector<int>&` are accepted in metadata. The generated driver stores them as normal values and passes them into the submitted function.
+
+For identity-sensitive functions, metadata can declare generic `disjoint` or `same_as` postconditions. The result contains boolean postcondition observations; raw memory addresses are never exposed.
+
+## Submit Class-Style Code
+
+C++ Class Mode supports a generic constructor followed by a sequence of declared operations. It does not contain drivers for individual design problems.
+
+A testcase uses `constructorArgs`, `operations`, and one expected result per operation:
+
+```json
+{
+  "mode": "class",
+  "class": {
+    "name": "Counter",
+    "constructor": { "params": [{ "name": "initial", "type": "int" }] },
+    "operations": [
+      { "name": "add", "returnType": "void", "params": [{ "name": "amount", "type": "int" }] },
+      { "name": "get", "returnType": "int", "params": [] }
+    ]
+  },
+  "testCases": [
+    {
+      "id": 1,
+      "constructorArgs": [3],
+      "operations": [
+        { "name": "add", "args": [4] },
+        { "name": "get", "args": [] }
+      ],
+      "expected": [null, 7]
+    }
+  ]
+}
+```
 
 ## Fetch Result
 
@@ -337,8 +377,10 @@ Use these values in the `language` field:
 - `c`
 - `cpp`
 - `python`
-- `go`
+- `go` (legacy stdin/stdout support; no Function Mode backend planned)
 - `java`
+
+LeetCode-style Function Mode currently targets C++ only. Python and Java Function/Class Mode support are deferred until the C++ roadmap is complete. The eventual status of the existing Go option will be decided separately; no new Go feature work is planned.
 
 ## C++ Example
 
@@ -400,6 +442,22 @@ Format Go code:
 gofmt -w cmd internal
 ```
 
+Run the opt-in Postgres integration tests. The database must already have the `submissions` table:
+
+```bash
+YEXJUDGE_TEST_DATABASE_URL='postgres://postgres@localhost/yexjudge?sslmode=disable' \
+  go test ./internal/judge -run Integration -count=1
+```
+
+Run the opt-in API/Docker integration test as well. It builds a temporary server binary, starts it against Postgres and the local Docker images, and verifies `/submissions`, `/submit`, `/run`, and compilation errors:
+
+```bash
+YEXJUDGE_TEST_DATABASE_URL='postgres://postgres@localhost/yexjudge?sslmode=disable' \
+  go test ./cmd/server -run APIIntegration -count=1 -v
+```
+
+The integration tests are skipped when `YEXJUDGE_TEST_DATABASE_URL` is not set, so `go test ./...` remains self-contained.
+
 ## Troubleshooting
 
 If the server fails during startup:
@@ -429,4 +487,4 @@ If execution fails with missing commands:
 
 ## Next Major Work
 
-The next architectural step is worker recovery for submissions that are claimed as `running` but never finish because the server or worker crashes. See [`architecture.md`](architecture.md) for the full work order.
+The implementation order is maintained in [`plan.md`](plan.md). After the test baseline is complete, the next major runtime work is hardening execution/admission control followed by recoverable queue leases and worker recovery.
