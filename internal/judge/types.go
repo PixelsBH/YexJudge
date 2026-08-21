@@ -135,6 +135,8 @@ type SubmissionResponse struct {
 
 type Sandbox struct {
 	ContainerName string
+	restarted     bool
+	needsReplace  bool
 }
 
 const (
@@ -144,6 +146,8 @@ const (
 	RuntimeError        Status = "runtime_error"
 	CompilationError    Status = "compilation_error"
 	MemoryLimitExceeded Status = "memory_limit_exceeded"
+	OutputLimitExceeded Status = "output_limit_exceeded"
+	InfrastructureError Status = "infrastructure_error"
 	ValidationError     Status = "validation_error"
 )
 

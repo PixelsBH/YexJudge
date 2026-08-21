@@ -44,17 +44,33 @@ func (p *ExecutorSandboxPool) Acquire(ctx context.Context, limits Limits) (*Sand
 }
 
 func (p *ExecutorSandboxPool) Release(sandbox *Sandbox) {
+	if sandbox.needsReplace {
+		sandbox.needsReplace = false
+		p.replace(sandbox)
+		return
+	}
+
+	if sandbox.restarted {
+		sandbox.restarted = false
+		p.available <- sandbox
+		return
+	}
+
 	if err := p.executor.ResetSandbox(context.Background(), sandbox); err != nil {
 		log.Println("failed to reset reusable sandbox, replacing it:", err)
-		p.executor.RemoveSandbox(sandbox)
-
-		replacement, startErr := p.executor.StartSandbox(context.Background())
-		if startErr != nil {
-			log.Println("failed to replace reusable sandbox:", startErr)
-			return
-		}
-		sandbox = replacement
+		p.replace(sandbox)
+		return
 	}
 
 	p.available <- sandbox
+}
+
+func (p *ExecutorSandboxPool) replace(sandbox *Sandbox) {
+	p.executor.RemoveSandbox(sandbox)
+	replacement, err := p.executor.StartSandbox(context.Background())
+	if err != nil {
+		log.Println("failed to replace reusable sandbox:", err)
+		return
+	}
+	p.available <- replacement
 }

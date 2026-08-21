@@ -9,19 +9,19 @@ import (
 
 func submissionHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		writeAPIError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
 
 	id := strings.TrimPrefix(r.URL.Path, "/submissions/")
 	if id == "" || id == r.URL.Path {
-		http.Error(w, "submission id is required", http.StatusBadRequest)
+		writeAPIError(w, http.StatusBadRequest, "invalid_submission_id", "submission id is required")
 		return
 	}
 
 	submission, ok := submissionStore.Get(id)
 	if !ok {
-		http.Error(w, "submission not found", http.StatusNotFound)
+		writeAPIError(w, http.StatusNotFound, "not_found", "submission not found")
 		return
 	}
 

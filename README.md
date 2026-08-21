@@ -120,7 +120,20 @@ SANDBOX_POOL_SIZE=4
 DATABASE_URL=postgres://postgres@localhost:5432/yexjudge?sslmode=disable
 QUEUE_POLL_INTERVAL_MS=500
 SUBMIT_TIMEOUT_MS=10000
+RUN_CONCURRENCY=2
 ```
+
+Phase 3 execution limits and API behavior:
+
+- JSON request bodies are limited to 1 MiB and use strict decoding: unknown fields and trailing JSON values are rejected with `400`.
+- Every response includes an `X-Request-ID`; a valid client-supplied ID is preserved. API errors use `{ "error": { "code", "message", "requestId" } }`.
+- `/run` has independent admission controlled by `RUN_CONCURRENCY` (default `2`). A full direct-run budget returns `429`; queued `/submissions` are not counted against it.
+- Compiler and runtime stdout/stderr are each capped at 64 KiB. Exceeding the cap cancels execution and produces `output_limit_exceeded`.
+- Docker compile, start, update, exec, restart, and staging failures are infrastructure failures. Terminal async jobs persist `infrastructure_error` with a capped diagnostic rather than silently losing the result.
+- Compile containers run without network access, with bounded CPU, memory, PIDs, filesystem access, and an unprivileged user. Runtime sandboxes use the shared `yexjudge-runtime:latest` image with the same restrictions.
+- Reusable sandboxes are readiness-checked after startup and restart. An execution-triggered restart is not reset a second time by pool release; failed reset/readiness checks replace that sandbox.
+
+Authentication and per-user rate limiting are deferred because the current service has no user/account model. Recovery of submissions left in `running` after a process crash is Phase 4.
 
 Expected log:
 
@@ -172,6 +185,8 @@ Example response:
 ```
 
 `/run` currently supports source code that does not require external input. Initialize values inside the submitted program. Use `/submit` for LeetCode-style function submissions.
+
+Direct `/run` requests are admitted separately from queued submissions. When the configured `RUN_CONCURRENCY` capacity is full, the endpoint returns `429`. Program and compiler stdout/stderr are capped; exceeding the cap returns `output_limit_exceeded`.
 
 ## Submit Code
 
@@ -355,6 +370,8 @@ Possible result statuses include:
 - `compilation_error`
 - `memory_limit_exceeded`
 - `validation_error`
+- `output_limit_exceeded`
+- `infrastructure_error`
 
 ## Verify Postgres Persistence
 
@@ -430,10 +447,12 @@ curl -X POST http://localhost:8080/submissions \
 
 ## Development Checks
 
-Run Go tests:
+Run the local Go checks:
 
 ```bash
-go test ./...
+GOCACHE=/tmp/yexjudge-go-cache go test ./...
+GOCACHE=/tmp/yexjudge-go-cache go test -race ./...
+GOCACHE=/tmp/yexjudge-go-cache go vet ./...
 ```
 
 Format Go code:
@@ -445,18 +464,21 @@ gofmt -w cmd internal
 Run the opt-in Postgres integration tests. The database must already have the `submissions` table:
 
 ```bash
-YEXJUDGE_TEST_DATABASE_URL='postgres://postgres@localhost/yexjudge?sslmode=disable' \
-  go test ./internal/judge -run Integration -count=1
+YEXJUDGE_TEST_DATABASE_URL='postgres://postgres@localhost:5432/yexjudge?sslmode=disable' \
+  GOCACHE=/tmp/yexjudge-go-cache \
+  go test ./internal/judge -count=1
 ```
 
 Run the opt-in API/Docker integration test as well. It builds a temporary server binary, starts it against Postgres and the local Docker images, and verifies `/submissions`, `/submit`, `/run`, and compilation errors:
 
 ```bash
-YEXJUDGE_TEST_DATABASE_URL='postgres://postgres@localhost/yexjudge?sslmode=disable' \
-  go test ./cmd/server -run APIIntegration -count=1 -v
+YEXJUDGE_TEST_DATABASE_URL='postgres://postgres@localhost:5432/yexjudge?sslmode=disable' \
+  GOCACHE=/tmp/yexjudge-go-cache \
+  go test ./cmd/server -run TestAPIIntegration -count=3 -v
 ```
 
 The integration tests are skipped when `YEXJUDGE_TEST_DATABASE_URL` is not set, so `go test ./...` remains self-contained.
+The API test uses one worker and one runtime sandbox to exercise the supported single-sandbox configuration. Its test-only synchronous wait budget is 4 seconds, below the 5-second HTTP client timeout. Cold C/C++, Go, and Java compiler images/build caches can make the first submission take tens of seconds; the asynchronous polling budget allows that startup cost.
 
 ## Troubleshooting
 
@@ -472,6 +494,7 @@ If the first C, C++, Go, or Java submission is slow:
 
 - Docker may be pulling the compile image for the first time
 - pre-pull the compile images listed above
+- a cold compiler/container setup is expected to take tens of seconds; the API acceptance test allows for it
 
 If submissions stay queued:
 

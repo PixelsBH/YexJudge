@@ -6,15 +6,22 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"strings"
 	"time"
 	"yexjudge/internal/judge/languages"
 	"yexjudge/internal/runner"
 )
 
-const RuntimeSandboxImage = "yexjudge-runtime:latest"
+const (
+	RuntimeSandboxImage     = "yexjudge-runtime:latest"
+	MinCompileMemoryLimitMb = 512
+	CompileTimeout          = 30 * time.Second
+	sandboxReadyTimeout     = 2 * time.Second
+	sandboxReadyPoll        = 50 * time.Millisecond
+)
 
 type Executor interface {
-	Compile(ctx context.Context, workspace string, spec languages.Spec) (*runner.RunResult, error)
+	Compile(ctx context.Context, workspace string, spec languages.Spec, limits Limits) (*runner.RunResult, error)
 	StartSandbox(ctx context.Context) (*Sandbox, error)
 	ConfigureSandbox(ctx context.Context, sandbox *Sandbox, limits Limits) error
 	PrepareSandbox(ctx context.Context, sandbox *Sandbox, workspace string) error
@@ -31,15 +38,110 @@ func NewDockerExecutor(r runner.Runner) *DockerExecutor {
 	return &DockerExecutor{runner: r}
 }
 
-func (e *DockerExecutor) Compile(ctx context.Context,
-	workspace string, spec languages.Spec) (*runner.RunResult, error) {
-	ctxCompile, cancel := context.WithTimeout(ctx, 10*time.Second)
+func dockerCommandError(action string, result *runner.RunResult) error {
+	if result == nil {
+		return fmt.Errorf("%s returned no result", action)
+	}
+	if result.ExitCode == 0 {
+		return nil
+	}
+	message := strings.TrimSpace(result.Stderr)
+	if len(message) > runner.DefaultOutputLimitBytes {
+		message = message[:runner.DefaultOutputLimitBytes]
+	}
+	if message == "" {
+		return fmt.Errorf("%s exited with code %d", action, result.ExitCode)
+	}
+	return fmt.Errorf("%s exited with code %d: %s", action, result.ExitCode, message)
+}
+
+type diagnosticBuffer struct {
+	bytes.Buffer
+	limit int
+}
+
+func (b *diagnosticBuffer) Write(data []byte) (int, error) {
+	remaining := b.limit - b.Len()
+	if remaining > 0 {
+		if len(data) > remaining {
+			_, _ = b.Buffer.Write(data[:remaining])
+		} else {
+			_, _ = b.Buffer.Write(data)
+		}
+	}
+	return len(data), nil
+}
+
+func (e *DockerExecutor) waitForSandboxReady(ctx context.Context, sandbox *Sandbox) error {
+	readyCtx, cancel := context.WithTimeout(ctx, sandboxReadyTimeout)
 	defer cancel()
+
+	var lastErr error
+	for {
+		result, err := e.runner.Run(
+			readyCtx,
+			"",
+			"docker",
+			"exec",
+			sandbox.ContainerName,
+			"true",
+		)
+		if err != nil {
+			lastErr = err
+		} else if commandErr := dockerCommandError("check sandbox readiness", result); commandErr != nil {
+			lastErr = commandErr
+		} else {
+			return nil
+		}
+
+		timer := time.NewTimer(sandboxReadyPoll)
+		select {
+		case <-readyCtx.Done():
+			if lastErr == nil {
+				lastErr = readyCtx.Err()
+			}
+			return fmt.Errorf("sandbox %s did not become ready: %w", sandbox.ContainerName, lastErr)
+		case <-timer.C:
+		}
+	}
+}
+
+func (e *DockerExecutor) Compile(ctx context.Context,
+	workspace string, spec languages.Spec, limits Limits) (*runner.RunResult, error) {
+	ctxCompile, cancel := context.WithTimeout(ctx, CompileTimeout)
+	defer cancel()
+	compileContainer := fmt.Sprintf("yexjudge-compile-%d", time.Now().UnixNano())
+	defer func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cleanupCancel()
+		_, _ = e.runner.Run(cleanupCtx, "", "docker", "rm", "-f", compileContainer)
+	}()
+
+	compileMemoryMb := limits.MemoryLimitMb
+	if compileMemoryMb < MinCompileMemoryLimitMb {
+		compileMemoryMb = MinCompileMemoryLimitMb
+	}
 
 	args := []string{
 		"run",
 		"--rm",
-		"-v", workspace + ":/workspace",
+		"--name", compileContainer,
+		"--network", "none",
+		"--memory", fmt.Sprintf("%dm", compileMemoryMb),
+		"--memory-swap", fmt.Sprintf("%dm", compileMemoryMb),
+		"--cpus", "1",
+		"--pids-limit", "128",
+		"--cap-drop", "ALL",
+		"--security-opt", "no-new-privileges",
+		"--read-only",
+		"--tmpfs", "/tmp:rw,exec,nosuid,size=128m,mode=1777",
+		"--env", "HOME=/tmp",
+		"--env", "GOCACHE=/tmp/go-build",
+		"--env", "GOMODCACHE=/tmp/go-mod",
+		"--ulimit", "nofile=1024:1024",
+		"--user", "10001:10001",
+		"--workdir", "/workspace",
+		"-v", workspace + ":/workspace:rw",
 		spec.CompileImage(),
 	}
 	args = append(args, spec.CompileCommand()...)
@@ -53,7 +155,7 @@ func (e *DockerExecutor) StartSandbox(ctx context.Context) (*Sandbox, error) {
 	ctxContainer, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	_, err := e.runner.Run(
+	result, err := e.runner.Run(
 		ctxContainer,
 		"",
 		"docker",
@@ -61,12 +163,15 @@ func (e *DockerExecutor) StartSandbox(ctx context.Context) (*Sandbox, error) {
 		"-d",
 		"--name", containerName,
 		"--memory", fmt.Sprintf("%dm", MaxMemoryLimitMb),
+		"--memory-swap", fmt.Sprintf("%dm", MaxMemoryLimitMb),
 		"--cpus", "1",
 		"--network", "none",
 		"--pids-limit", "64",
+		"--ulimit", "nofile=1024:1024",
 		"--cap-drop", "ALL",
 		"--user", "10001:10001",
 		"--security-opt", "no-new-privileges",
+		"--read-only",
 		"--tmpfs", "/workspace:rw,exec,size=64m,mode=700,uid=10001,gid=10001",
 		"--tmpfs", "/tmp:rw,noexec,nosuid,size=16m,mode=700,uid=10001,gid=10001",
 		"--workdir", "/workspace",
@@ -76,25 +181,40 @@ func (e *DockerExecutor) StartSandbox(ctx context.Context) (*Sandbox, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := dockerCommandError("start sandbox", result); err != nil {
+		return nil, err
+	}
 
-	return &Sandbox{ContainerName: containerName}, nil
+	sandbox := &Sandbox{ContainerName: containerName}
+	if err := e.waitForSandboxReady(ctx, sandbox); err != nil {
+		e.RemoveSandbox(sandbox)
+		return nil, err
+	}
+
+	return sandbox, nil
 }
 
 func (e *DockerExecutor) ConfigureSandbox(ctx context.Context, sandbox *Sandbox, limits Limits) error {
 	memoryLimit := fmt.Sprintf("%dm", limits.MemoryLimitMb)
-	_, err := e.runner.Run(
+	result, err := e.runner.Run(
 		ctx,
 		"",
 		"docker",
 		"update",
 		"--memory", memoryLimit,
+		"--memory-swap", memoryLimit,
+		"--cpus", "1",
+		"--pids-limit", "64",
 		sandbox.ContainerName,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	return dockerCommandError("configure sandbox", result)
 }
 
 func (e *DockerExecutor) PrepareSandbox(ctx context.Context, sandbox *Sandbox, workspace string) error {
-	_, err := e.runner.Run(
+	result, err := e.runner.Run(
 		ctx,
 		"",
 		"docker",
@@ -105,6 +225,9 @@ func (e *DockerExecutor) PrepareSandbox(ctx context.Context, sandbox *Sandbox, w
 		"rm -rf /workspace/* /workspace/.[!.]* /workspace/..?*",
 	)
 	if err != nil {
+		return err
+	}
+	if err := dockerCommandError("clear sandbox workspace", result); err != nil {
 		return err
 	}
 
@@ -128,8 +251,10 @@ func (e *DockerExecutor) PrepareSandbox(ctx context.Context, sandbox *Sandbox, w
 	tarCmd.Stdout = pipeWriter
 	dockerCmd.Stdin = pipeReader
 
-	var tarStderr bytes.Buffer
-	var dockerStderr bytes.Buffer
+	var tarStderr diagnosticBuffer
+	var dockerStderr diagnosticBuffer
+	tarStderr.limit = runner.DefaultOutputLimitBytes
+	dockerStderr.limit = runner.DefaultOutputLimitBytes
 	tarCmd.Stderr = &tarStderr
 	dockerCmd.Stderr = &dockerStderr
 
@@ -156,7 +281,7 @@ func (e *DockerExecutor) PrepareSandbox(ctx context.Context, sandbox *Sandbox, w
 	if dockerErr != nil {
 		return fmt.Errorf("extract workspace into sandbox: %w: %s", dockerErr, dockerStderr.String())
 	}
-	_, err = e.runner.Run(
+	result, err = e.runner.Run(
 		ctx,
 		"",
 		"docker",
@@ -169,11 +294,11 @@ func (e *DockerExecutor) PrepareSandbox(ctx context.Context, sandbox *Sandbox, w
 	if err != nil {
 		return err
 	}
-	return nil
+	return dockerCommandError("set sandbox executable permissions", result)
 }
 
 func (e *DockerExecutor) ResetSandbox(ctx context.Context, sandbox *Sandbox) error {
-	_, err := e.runner.Run(
+	result, err := e.runner.Run(
 		ctx,
 		"",
 		"docker",
@@ -181,7 +306,13 @@ func (e *DockerExecutor) ResetSandbox(ctx context.Context, sandbox *Sandbox) err
 		"-t", "0",
 		sandbox.ContainerName,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	if err := dockerCommandError("reset sandbox", result); err != nil {
+		return err
+	}
+	return e.waitForSandboxReady(ctx, sandbox)
 }
 
 func (e *DockerExecutor) RemoveSandbox(sandbox *Sandbox) {
@@ -208,10 +339,49 @@ func (e *DockerExecutor) RunTestCase(
 	}
 	execArgs = append(execArgs, spec.RunCommand()...)
 
-	return e.runner.Run(
+	result, err := e.runner.Run(
 		ctx,
 		input+"\n",
 		"docker",
 		execArgs...,
 	)
+	if err != nil {
+		return nil, err
+	}
+
+	// docker exec is a client-side command. Canceling that client does not
+	// reliably terminate the process that the daemon started in the sandbox.
+	// Restarting the reusable container makes both timeout and output-limit
+	// paths kill the entire process tree before the sandbox is returned to the
+	// pool.
+	if result.OutputLimitExceeded || ctx.Err() != nil {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cleanupCancel()
+		restartResult, restartErr := e.runner.Run(
+			cleanupCtx,
+			"",
+			"docker",
+			"restart",
+			"-t", "0",
+			sandbox.ContainerName,
+		)
+		if restartErr != nil {
+			sandbox.needsReplace = true
+			return nil, fmt.Errorf("restart sandbox after canceled execution: %w", restartErr)
+		}
+		if err := dockerCommandError("restart sandbox after canceled execution", restartResult); err != nil {
+			sandbox.needsReplace = true
+			return nil, err
+		}
+		if err := e.waitForSandboxReady(cleanupCtx, sandbox); err != nil {
+			sandbox.needsReplace = true
+			return nil, err
+		}
+		sandbox.restarted = true
+	}
+
+	if ctx.Err() == context.DeadlineExceeded {
+		result.TimedOut = true
+	}
+	return result, nil
 }

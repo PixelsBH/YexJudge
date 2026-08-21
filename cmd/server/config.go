@@ -13,6 +13,7 @@ const (
 	defaultSandboxPoolSize = 4
 	defaultQueuePollMs     = 500
 	defaultSubmitTimeoutMs = 10000
+	defaultRunConcurrency  = 2
 )
 
 type config struct {
@@ -22,6 +23,7 @@ type config struct {
 	databaseURL     string
 	queuePoll       time.Duration
 	submitTimeout   time.Duration
+	runConcurrency  int
 }
 
 func loadConfig() config {
@@ -32,6 +34,7 @@ func loadConfig() config {
 		databaseURL:     getEnv("DATABASE_URL", ""),
 		queuePoll:       time.Duration(getEnvInt("QUEUE_POLL_INTERVAL_MS", defaultQueuePollMs)) * time.Millisecond,
 		submitTimeout:   time.Duration(getEnvInt("SUBMIT_TIMEOUT_MS", defaultSubmitTimeoutMs)) * time.Millisecond,
+		runConcurrency:  getEnvInt("RUN_CONCURRENCY", defaultRunConcurrency),
 	}
 }
 

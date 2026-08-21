@@ -12,6 +12,12 @@ func createWorkspace(job Job, spec languages.Spec) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// Compile containers run as the unprivileged judge user, so the bind-mounted
+	// workspace must be traversable by that user.
+	if err := os.Chmod(workspace, 0777); err != nil {
+		os.RemoveAll(workspace)
+		return "", err
+	}
 
 	sourcePath := filepath.Join(workspace, spec.SourceFileName())
 	sourceCode := job.SourceCode

@@ -14,18 +14,17 @@ type runRequest struct {
 	Limits     judge.Limits `json:"limits"`
 }
 
+var runAdmission = make(chan struct{}, defaultRunConcurrency)
+
 func runHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		writeAPIError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
 	defer r.Body.Close()
 
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
-
 	var request runRequest
-	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-		http.Error(w, "Invalid request payload", http.StatusBadRequest)
+	if !decodeJSONBody(w, r, &request) {
 		return
 	}
 
@@ -38,13 +37,21 @@ func runHandler(w http.ResponseWriter, r *http.Request) {
 		}},
 	}
 	if err := judge.ValidateJob(job); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeAPIError(w, http.StatusBadRequest, "validation_error", err.Error())
+		return
+	}
+
+	select {
+	case runAdmission <- struct{}{}:
+		defer func() { <-runAdmission }()
+	default:
+		writeAPIError(w, http.StatusTooManyRequests, "run_capacity_exhausted", "direct run capacity is currently exhausted")
 		return
 	}
 
 	result, err := judgeService.RunCode(r.Context(), job)
 	if err != nil {
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		writeAPIError(w, http.StatusInternalServerError, "internal_error", "internal error")
 		log.Println("failed to run code:", err)
 		return
 	}

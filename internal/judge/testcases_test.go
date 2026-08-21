@@ -3,6 +3,7 @@ package judge
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,11 +13,12 @@ import (
 
 type testcaseExecutor struct {
 	compileResult *runner.RunResult
+	prepareErr    error
 	runs          []*runner.RunResult
 	runIndex      int
 }
 
-func (e *testcaseExecutor) Compile(context.Context, string, languages.Spec) (*runner.RunResult, error) {
+func (e *testcaseExecutor) Compile(context.Context, string, languages.Spec, Limits) (*runner.RunResult, error) {
 	if e.compileResult == nil {
 		return &runner.RunResult{ExitCode: 0}, nil
 	}
@@ -29,7 +31,7 @@ func (e *testcaseExecutor) ConfigureSandbox(context.Context, *Sandbox, Limits) e
 	return nil
 }
 func (e *testcaseExecutor) PrepareSandbox(context.Context, *Sandbox, string) error {
-	return nil
+	return e.prepareErr
 }
 func (e *testcaseExecutor) ResetSandbox(context.Context, *Sandbox) error {
 	return nil
@@ -129,6 +131,16 @@ func TestRunTestCasesMapsVerdicts(t *testing.T) {
 			wantStatus: TimeLimitExceeded,
 			wantActual: "partial",
 		},
+		{
+			name: "output limit",
+			run: &runner.RunResult{
+				Stdout:              "partial",
+				OutputLimitExceeded: true,
+			},
+			wantStatus: OutputLimitExceeded,
+			wantActual: "partial",
+			wantError:  "program output exceeded the allowed limit",
+		},
 	}
 
 	for _, tt := range tests {
@@ -209,5 +221,36 @@ func TestProcessSubmissionMapsCompilationError(t *testing.T) {
 	}
 	if store.updates != 2 {
 		t.Fatalf("store updates = %d, want running plus final persistence updates", store.updates)
+	}
+}
+
+func TestProcessSubmissionPersistsInfrastructureResult(t *testing.T) {
+	store := &testcaseStore{}
+	executor := &testcaseExecutor{prepareErr: errors.New("docker exec exited with code 126: permission denied")}
+	registry := languages.NewRegistry(languages.Python{})
+	service := NewService(executor, testcasePool{}, store, registry)
+	submission := Submission{
+		ID:     "infrastructure-error",
+		Status: SubmissionQueued,
+		Job: Job{
+			Language:   "python",
+			SourceCode: "print('test')",
+			TestCases:  []TestCase{{ID: 1, ExpectedOutput: "test"}},
+			Limits:     Limits{TimeLimitMs: 1000, MemoryLimitMb: 128},
+		},
+	}
+
+	result, err := service.ProcessSubmission(context.Background(), submission)
+	if err != nil {
+		t.Fatalf("ProcessSubmission() error = %v", err)
+	}
+	if result.Status != InfrastructureError {
+		t.Fatalf("result status = %q, want infrastructure_error", result.Status)
+	}
+	if store.submission.Status != SubmissionFailed || store.submission.Result == nil {
+		t.Fatalf("stored submission = %+v, want failed infrastructure result", store.submission)
+	}
+	if store.submission.Result.Status != InfrastructureError || !strings.Contains(store.submission.Result.ErrorMessage, "permission denied") {
+		t.Fatalf("stored result = %+v, want diagnostic", store.submission.Result)
 	}
 }

@@ -15,7 +15,7 @@ const submitPollInterval = 100 * time.Millisecond
 // submitHandler provides a synchronous convenience API over the normal async flow.
 func submitHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		writeAPIError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
 	defer r.Body.Close()
@@ -26,13 +26,13 @@ func submitHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := judge.ValidateJob(job); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeAPIError(w, http.StatusBadRequest, "validation_error", err.Error())
 		return
 	}
 
 	submission, err := createAndQueueSubmission(job)
 	if err != nil {
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		writeAPIError(w, http.StatusInternalServerError, "internal_error", "internal error")
 		log.Println("failed to create submission:", err)
 		return
 	}

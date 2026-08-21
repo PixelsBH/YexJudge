@@ -48,12 +48,14 @@ flowchart TD
     Worker --> Service[Judge Service]
     Service --> Registry[Language Registry]
     Service --> Workspace[Create Workspace]
-    Service --> Compile[Executor Compile]
-    Compile -->|Compilation error| CE[Store compilation_error]
+    Service --> Compile[Compile in restricted container]
+    Compile -->|User compiler exit| CE[Store compilation_error]
+    Compile -->|Docker/timeout failure| IE[Store infrastructure_error]
     Compile -->|Success or skipped| Acquire[Acquire Universal Sandbox]
     Acquire --> Sandbox[Sandbox Handle]
     Sandbox --> Stage[Copy Submission Files into Sandbox]
-    Stage --> Execute[Run Test Cases]
+    Stage -->|Docker lifecycle failure| IE
+    Stage --> Execute[Run Test Cases with bounded output]
     Execute --> Compare[Compare Output and Verdict]
     Compare -->|Mismatch| WA[Store wrong_answer]
     Compare -->|Timeout| TLE[Store time_limit_exceeded]
@@ -62,8 +64,15 @@ flowchart TD
     WA --> Reset
     TLE --> Reset
     RE --> Reset
-    AC --> Reset[Restart and Reset Sandbox]
-    Reset --> Release[Return Sandbox to Pool]
+    Execute -->|Output limit or timeout| Restart[Cancel process and restart sandbox]
+    Restart -->|Readiness failure| Replace[Replace sandbox]
+    Restart -->|Ready| Release[Return sandbox without a second reset]
+    AC --> Reset[Restart, readiness-check, and reset Sandbox]
+    Reset -->|Reset/readiness failure| Replace
+    Reset --> Release
+    Client -->|POST /run| RunAdmission[/run admission semaphore]
+    RunAdmission -->|Capacity full| TooMany[429 structured error]
+    RunAdmission --> Service
     Client -->|GET /submissions/id| Fetch[Submission Endpoint]
     Fetch --> StoreLookup[Read Stored Submission Status and Result]
 ```
@@ -80,14 +89,17 @@ Responsibilities:
 - receive `POST /submit` as a bounded synchronous convenience endpoint
 - receive `POST /run` for one-off sandboxed execution without persistence, test-case comparison, or user-provided stdin
 - receive `GET /submissions/{id}`
-- decode request JSON
-- enforce request-size limit
+- decode strict request JSON
+- enforce the 1 MiB request-size limit
+- attach or preserve a safe `X-Request-ID`
+- return structured JSON errors
 - validate obvious bad input early
 - create and store queued submissions
 - enqueue accepted submissions
 - return submission acceptance metadata
 - optionally wait for a bounded period and return the final result
 - execute one raw-stdin request synchronously through the existing compiler and sandbox infrastructure
+- admit `/run` independently with the bounded `RUN_CONCURRENCY` semaphore
 - return stored submission status and result
 
 This layer should not contain compilation or execution logic.
@@ -118,11 +130,16 @@ The executor is the infrastructure layer that knows how to interact with Docker.
 Responsibilities:
 
 - compile code inside the correct compile image
+- enforce Docker exit-code checks and retain capped stderr diagnostics for lifecycle failures
+- apply compile isolation: no network, bounded CPU/memory/PIDs, read-only root, tmpfs workspace, and unprivileged execution
 - start universal runtime sandboxes during server startup
+- readiness-check a sandbox after startup and restart before reuse
 - configure a borrowed sandbox with the submission memory limit
 - copy submission files into a borrowed sandbox
-- release the sandbox
+- cancel and restart a sandbox after timeout/output-limit execution, without double-resetting it on release
+- replace a sandbox when reset or readiness fails
 - execute one test case command inside the sandbox
+- cap stdout and stderr at 64 KiB per stream
 
 The executor should know how execution happens, but not what verdict should be returned.
 
@@ -140,8 +157,10 @@ Current behavior:
 - the server pre-creates a fixed number of universal sandboxes at startup
 - `Acquire` borrows an available sandbox
 - source files or compiled artifacts are copied into the borrowed sandbox
-- `Release` restarts the container to terminate remaining processes and clear temporary workspace state
-- the reset sandbox is returned to the pool
+- `Release` restarts the container to terminate remaining processes and clear temporary workspace state, then waits for readiness
+- if execution already restarted a sandbox, release returns it without a second reset
+- failed reset/readiness checks remove the old container and start a replacement
+- all returned sandboxes are readiness-checked before reuse
 
 The custom runtime image is based on Debian slim and includes Python and a Java runtime. Compilers remain outside runtime sandboxes.
 
@@ -333,7 +352,7 @@ Validation should exist in two places:
 - service layer as defensive validation
 
 This keeps the system safe even after multiple entrypoints or worker paths are introduced.
-Current admission caps limit submissions to `10000ms` per test case and `512MB` of sandbox memory.
+Current admission and execution caps include a 1 MiB JSON request body, `RUN_CONCURRENCY` direct-run admission (default 2), 64 KiB stdout/stderr per stream, at most 10000ms per test case, and 512MB of sandbox memory. Compile containers and runtime sandboxes are network-disabled and resource-limited.
 
 ### Language Strategy
 
@@ -350,9 +369,9 @@ The current implementation supports that path for C++ only. It is intentionally 
 
 ### Pool Strategy
 
-The current `ExecutorSandboxPool` borrows warm universal sandboxes and returns them after reset. A container restart on release provides a practical cleanup boundary for temporary filesystem state and stray runtime processes.
+The current `ExecutorSandboxPool` borrows warm universal sandboxes and returns them after a restart plus bounded readiness check. Timeout/output-limit execution restarts the sandbox immediately and marks it so release does not double-reset it. Failed reset/readiness checks remove the old container and replace it; graceful server shutdown removes the startup-created pool containers.
 
-Future hardening should add graceful server shutdown cleanup, failure recovery for lost pool capacity, and durable worker coordination.
+Future hardening should add failure recovery for lost pool capacity and durable worker coordination.
 
 ## Summary
 

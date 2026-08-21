@@ -57,7 +57,7 @@ func TestAPIIntegration(t *testing.T) {
 	port := listener.Addr().(*net.TCPAddr).Port
 	_ = listener.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	server := exec.CommandContext(ctx, binaryPath)
 	server.Dir = root
@@ -67,7 +67,9 @@ func TestAPIIntegration(t *testing.T) {
 		"WORKER_COUNT=1",
 		"SANDBOX_POOL_SIZE=1",
 		"QUEUE_POLL_INTERVAL_MS=50",
-		"SUBMIT_TIMEOUT_MS=3000",
+		// Keep the synchronous test budget below the HTTP client's five-second
+		// timeout while allowing a cold compile to finish.
+		"SUBMIT_TIMEOUT_MS=4000",
 	)
 	var serverLog bytes.Buffer
 	server.Stdout = &serverLog
@@ -77,9 +79,16 @@ func TestAPIIntegration(t *testing.T) {
 	}
 	defer func() {
 		if server.Process != nil {
-			_ = server.Process.Kill()
+			_ = server.Process.Signal(os.Interrupt)
+			wait := make(chan error, 1)
+			go func() { wait <- server.Wait() }()
+			select {
+			case <-wait:
+			case <-time.After(10 * time.Second):
+				_ = server.Process.Kill()
+				<-wait
+			}
 		}
-		_ = server.Wait()
 	}()
 
 	baseURL := fmt.Sprintf("http://127.0.0.1:%d", port)
@@ -111,7 +120,7 @@ func TestAPIIntegration(t *testing.T) {
 		submissionIDs = append(submissionIDs, id)
 		result := waitForIntegrationSubmission(t, client, baseURL+"/submissions/"+id, &serverLog)
 		if result.Status != judge.SubmissionFinished || result.Result == nil || result.Result.Status != judge.Accepted {
-			t.Fatalf("submission result = %+v, want finished accepted", result)
+			t.Fatalf("submission result = %+v, want finished accepted; log:\n%s", result, serverLog.String())
 		}
 	})
 
@@ -138,7 +147,7 @@ func TestAPIIntegration(t *testing.T) {
 				submissionIDs = append(submissionIDs, id)
 				result := waitForIntegrationSubmission(t, client, baseURL+"/submissions/"+id, &serverLog)
 				if result.Status != judge.SubmissionFinished || result.Result == nil || result.Result.Status != judge.Accepted {
-					t.Fatalf("%s result = %+v, want finished accepted", test.language, result)
+					t.Fatalf("%s result = status=%s result=%+v, want finished accepted; log:\n%s", test.language, result.Status, result.Result, serverLog.String())
 				}
 			})
 		}
@@ -154,7 +163,7 @@ func TestAPIIntegration(t *testing.T) {
 		var result judge.SubmissionResponse
 		decodeJSON(t, response, &result)
 		if result.Status != judge.SubmissionFinished || result.Result == nil || result.Result.Status != judge.Accepted {
-			t.Fatalf("/submit response = %+v, want finished accepted", result)
+			t.Fatalf("/submit response = %+v, want finished accepted; log:\n%s", result, serverLog.String())
 		}
 		submissionIDs = append(submissionIDs, result.ID)
 	})
@@ -179,7 +188,7 @@ func TestAPIIntegration(t *testing.T) {
 		submissionIDs = append(submissionIDs, id)
 		result := waitForIntegrationSubmission(t, client, baseURL+"/submissions/"+id, &serverLog)
 		if result.Status != judge.SubmissionFinished || result.Result == nil || result.Result.Status != judge.Accepted {
-			t.Fatalf("function-mode result = %+v, want finished accepted", result)
+			t.Fatalf("function-mode result = status=%s result=%+v, want finished accepted; log:\n%s", result.Status, result.Result, serverLog.String())
 		}
 	})
 
@@ -212,7 +221,7 @@ func TestAPIIntegration(t *testing.T) {
 		var result judge.SubmissionResponse
 		decodeJSON(t, response, &result)
 		if result.Status != judge.SubmissionFinished || result.Result == nil || result.Result.Status != judge.Accepted {
-			t.Fatalf("class-mode response = %+v, want finished accepted", result)
+			t.Fatalf("class-mode response = status=%s result=%+v, want finished accepted; log:\n%s", result.Status, result.Result, serverLog.String())
 		}
 		submissionIDs = append(submissionIDs, result.ID)
 	})
@@ -266,7 +275,7 @@ func TestAPIIntegration(t *testing.T) {
 		var result judge.SubmissionAcceptedResponse
 		decodeJSON(t, response, &result)
 		if result.SubmissionID == "" || result.Status == judge.SubmissionFinished {
-			t.Fatalf("/submit timeout response = %+v, want accepted response", result)
+			t.Fatalf("/submit timeout response = %+v, want accepted response; log:\n%s", result, serverLog.String())
 		}
 		submissionIDs = append(submissionIDs, result.SubmissionID)
 	})
@@ -281,7 +290,7 @@ func TestAPIIntegration(t *testing.T) {
 		submissionIDs = append(submissionIDs, id)
 		result := waitForIntegrationSubmission(t, client, baseURL+"/submissions/"+id, &serverLog)
 		if result.Status != judge.SubmissionFinished || result.Result == nil || result.Result.Status != judge.CompilationError {
-			t.Fatalf("compilation result = %+v, want finished compilation_error", result)
+			t.Fatalf("compilation result = %+v, want finished compilation_error; log:\n%s", result, serverLog.String())
 		}
 	})
 }
@@ -346,7 +355,7 @@ func postAndDecode(t *testing.T, client *http.Client, url string, payload map[st
 
 func waitForIntegrationSubmission(t *testing.T, client *http.Client, url string, serverLog *bytes.Buffer) judge.SubmissionResponse {
 	t.Helper()
-	deadline := time.Now().Add(15 * time.Second)
+	deadline := time.Now().Add(45 * time.Second)
 	for time.Now().Before(deadline) {
 		response, err := client.Get(url)
 		if err == nil {

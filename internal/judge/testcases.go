@@ -34,6 +34,21 @@ func runTestCases(
 		if err != nil {
 			return Result{}, err
 		}
+		if ctx.Err() != nil {
+			return Result{
+				Status:         InfrastructureError,
+				FailedTestCase: failedTestCase(tc, runRes.Stdout),
+				ErrorMessage:   "program execution was canceled",
+			}, nil
+		}
+
+		if runRes.OutputLimitExceeded {
+			return Result{
+				Status:         OutputLimitExceeded,
+				FailedTestCase: failedTestCase(tc, runRes.Stdout),
+				ErrorMessage:   "program output exceeded the allowed limit",
+			}, nil
+		}
 
 		if runRes.TimedOut {
 			return Result{

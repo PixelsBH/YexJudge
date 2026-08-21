@@ -11,10 +11,11 @@ import (
 	"syscall"
 	"time"
 
-	_ "github.com/jackc/pgx/v5/stdlib"
 	"yexjudge/internal/judge"
 	"yexjudge/internal/judge/languages"
 	"yexjudge/internal/runner"
+
+	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
 var (
@@ -28,7 +29,7 @@ func createSubmissionHandler(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 
 	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		writeAPIError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
 
@@ -38,13 +39,13 @@ func createSubmissionHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := judge.ValidateJob(job); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeAPIError(w, http.StatusBadRequest, "validation_error", err.Error())
 		return
 	}
 
 	submission, err := createAndQueueSubmission(job)
 	if err != nil {
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		writeAPIError(w, http.StatusInternalServerError, "internal_error", "internal error")
 		log.Println("failed to create submission:", err)
 		return
 	}
@@ -90,7 +91,7 @@ func submissionsCollectionHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	writeAPIError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 }
 
 func startWorker(ctx context.Context, workerID int) {
@@ -152,6 +153,7 @@ func cleanupSandboxes(executor judge.Executor, sandboxes []*judge.Sandbox) {
 func main() {
 	cfg := loadConfig()
 	submitTimeout = cfg.submitTimeout
+	runAdmission = make(chan struct{}, cfg.runConcurrency)
 	cmdRunner := &runner.DockerRunner{}
 	registry := languages.NewRegistry(
 		languages.Cpp{},
@@ -199,7 +201,7 @@ func main() {
 
 	server := &http.Server{
 		Addr:    ":" + cfg.port,
-		Handler: mux,
+		Handler: requestIDMiddleware(mux),
 	}
 
 	shutdownDone := make(chan struct{})

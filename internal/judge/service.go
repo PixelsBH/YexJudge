@@ -47,9 +47,36 @@ func (s *Service) RunCode(ctx context.Context, job Job) (RunOutput, error) {
 	defer os.RemoveAll(workspace)
 
 	if spec.NeedsCompile() {
-		compileRes, err := s.executor.Compile(ctx, workspace, spec)
+		compileRes, err := s.executor.Compile(ctx, workspace, spec, job.Limits)
 		if err != nil {
 			return RunOutput{}, err
+		}
+		if ctx.Err() != nil {
+			return RunOutput{
+				Status:       InfrastructureError,
+				ErrorMessage: "compile execution was canceled",
+			}, nil
+		}
+		if compileRes.TimedOut {
+			return RunOutput{
+				Status:       InfrastructureError,
+				ErrorOutput:  compileRes.Stderr,
+				ErrorMessage: "compile container exceeded the compiler time limit",
+			}, nil
+		}
+		if compileRes.OutputLimitExceeded {
+			return RunOutput{
+				Status:       OutputLimitExceeded,
+				ErrorOutput:  compileRes.Stderr,
+				ErrorMessage: "compiler output exceeded the allowed limit",
+			}, nil
+		}
+		if compileRes.ExitCode == 125 {
+			return RunOutput{
+				Status:       InfrastructureError,
+				ErrorOutput:  compileRes.Stderr,
+				ErrorMessage: "compile container failed to start",
+			}, nil
 		}
 		if compileRes.ExitCode != 0 {
 			return RunOutput{
@@ -77,13 +104,22 @@ func (s *Service) RunCode(ctx context.Context, job Job) (RunOutput, error) {
 	if err != nil {
 		return RunOutput{}, err
 	}
+	if ctx.Err() != nil {
+		return RunOutput{
+			Status:       InfrastructureError,
+			ErrorMessage: "program execution was canceled",
+		}, nil
+	}
 
 	output := RunOutput{
 		Status:    Accepted,
 		Output:    strings.TrimSpace(runRes.Stdout),
 		RuntimeMs: int(runRes.TimeUsed.Milliseconds()),
 	}
-	if runRes.TimedOut {
+	if runRes.OutputLimitExceeded {
+		output.Status = OutputLimitExceeded
+		output.ErrorMessage = "program output exceeded the allowed limit"
+	} else if runRes.TimedOut {
 		output.Status = TimeLimitExceeded
 	} else if runRes.ExitCode != 0 {
 		output.Status = RuntimeError
@@ -126,25 +162,54 @@ func (s *Service) ProcessSubmission(ctx context.Context, submission Submission) 
 	if err := s.store.Update(submission); err != nil {
 		return Result{}, err
 	}
+	infrastructureFailure := func(message string) (Result, error) {
+		result := Result{
+			Status:       InfrastructureError,
+			ErrorMessage: message,
+		}
+		submission.Status = SubmissionFailed
+		submission.Result = &result
+		if err := s.store.Update(submission); err != nil {
+			return Result{}, err
+		}
+		return result, nil
+	}
 
 	workspace, err := createWorkspace(submission.Job, spec)
 	if err != nil {
-		submission.Status = SubmissionFailed
-		if updateErr := s.store.Update(submission); updateErr != nil {
-			return Result{}, updateErr
-		}
-		return Result{}, err
+		return infrastructureFailure("create workspace: " + err.Error())
 	}
 	defer os.RemoveAll(workspace)
 
 	if spec.NeedsCompile() {
-		compileRes, err := s.executor.Compile(ctx, workspace, spec)
+		compileRes, err := s.executor.Compile(ctx, workspace, spec, submission.Job.Limits)
 		if err != nil {
-			submission.Status = SubmissionFailed
-			if updateErr := s.store.Update(submission); updateErr != nil {
-				return Result{}, updateErr
+			return infrastructureFailure("compile execution: " + err.Error())
+		}
+		if ctx.Err() != nil {
+			return infrastructureFailure("compile execution was canceled")
+		}
+
+		if compileRes.TimedOut {
+			return infrastructureFailure("compile container exceeded the compiler time limit")
+		}
+
+		if compileRes.OutputLimitExceeded {
+			result := Result{
+				Status:       OutputLimitExceeded,
+				ErrorMessage: "compiler output exceeded the allowed limit",
 			}
-			return Result{}, err
+
+			submission.Status = SubmissionFinished
+			submission.Result = &result
+			if err := s.store.Update(submission); err != nil {
+				return Result{}, err
+			}
+			return result, nil
+		}
+
+		if compileRes.ExitCode == 125 {
+			return infrastructureFailure("compile container failed to start")
 		}
 
 		if compileRes.ExitCode != 0 {
@@ -164,29 +229,17 @@ func (s *Service) ProcessSubmission(ctx context.Context, submission Submission) 
 
 	sandbox, err := s.pool.Acquire(ctx, submission.Job.Limits)
 	if err != nil {
-		submission.Status = SubmissionFailed
-		if updateErr := s.store.Update(submission); updateErr != nil {
-			return Result{}, updateErr
-		}
-		return Result{}, err
+		return infrastructureFailure("acquire sandbox: " + err.Error())
 	}
 	defer s.pool.Release(sandbox)
 
 	if err := s.executor.PrepareSandbox(ctx, sandbox, workspace); err != nil {
-		submission.Status = SubmissionFailed
-		if updateErr := s.store.Update(submission); updateErr != nil {
-			return Result{}, updateErr
-		}
-		return Result{}, err
+		return infrastructureFailure("prepare sandbox: " + err.Error())
 	}
 
 	result, err := runTestCases(ctx, s.executor, sandbox, submission.Job, spec)
 	if err != nil {
-		submission.Status = SubmissionFailed
-		if updateErr := s.store.Update(submission); updateErr != nil {
-			return Result{}, updateErr
-		}
-		return Result{}, err
+		return infrastructureFailure("run test cases: " + err.Error())
 	}
 
 	submission.Status = SubmissionFinished

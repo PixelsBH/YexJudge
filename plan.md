@@ -32,6 +32,23 @@ Current architectural constraints:
 - opt-in Postgres store/queue integration tests exist behind `YEXJUDGE_TEST_DATABASE_URL`
 - opt-in API/Docker integration tests cover the server lifecycle and core routes
 
+## Current Delivery Target
+
+The resume-ready milestone is a reliable C++-first production service, not complete multi-language LeetCode coverage.
+
+Work toward this milestone in the following order:
+
+1. Complete Phase 3: execution hardening and admission control.
+2. Complete Phase 4: durable queue recovery and retry handling.
+3. Complete Phase 5: minimum operational visibility needed to diagnose production behavior.
+4. Complete Phase 6: bounded fixed capacity and runtime-pool lifecycle hardening.
+5. Defer Phase 7: adaptive capacity and autoscaling.
+6. Complete Phase 8: measured compile-latency improvements, only if Phase 5 shows they are needed.
+7. Complete Phase 9: production packaging, deployment, health/readiness, and repeatable benchmarking.
+8. Defer Phase 10: Python/Java Function/Class backends and the final Go keep/remove decision.
+
+Phase 5 is the current plan's operational-visibility phase. It is not a reason to implement adaptive capacity; basic logs, timings, and diagnostics are required for a credible production project, while advanced scaling remains deferred.
+
 ## Phase 1: Design the Execution and Type Architecture
 
 Status: **complete for the initial C++ scope**. Phase 1A–1D contracts, recursive types, custom runtime adapters, identity policies, mutation observations, and generic Class Mode are implemented and tested.
@@ -97,10 +114,12 @@ Completed in the current C++ slice:
 
 Post-Phase 1 C++ backlog:
 
-- broaden nullable/value-wrapper coverage beyond `optional<T>`
-- add additional topology policies beyond `disjoint` and `same_as` when a concrete platform contract requires them
-- add further hidden runtime types such as specialized readers, nested values, and alternate graph schemas
-- expand Class Mode coverage for larger constructor/operation contracts such as LRU Cache, Min Stack, and Trie
+These are incremental C++ extensions, not a separate phase that blocks the production milestone. Implement them when a concrete YexCode metadata contract or representative test requires them; otherwise keep the current generic interfaces stable.
+
+- broaden nullable/value-wrapper coverage beyond `optional<T>`; schedule before Phase 9 only if the supported C++ problem set needs it
+- add additional topology policies beyond `disjoint` and `same_as` when a concrete platform contract requires them; the current identity policies already cover deep-copy and alias checks such as Copy List with Random Pointer
+- add further hidden runtime types such as specialized readers, nested values, and alternate graph schemas incrementally, before enabling problems that use them
+- metadata-driven Class Mode is already available now for constructor/operation contracts; add representative LRU Cache, Min Stack, and Trie metadata fixtures and end-to-end tests before Phase 9, without creating problem-specific generators
 
 For the current roadmap:
 
@@ -176,6 +195,8 @@ Definition of done:
 
 ## Phase 3: Harden Execution and Admission Control
 
+Status: **complete** for the current API and Docker execution scope.
+
 Goal: safely expose the judge beyond local use without making the architecture complex.
 
 Work:
@@ -186,26 +207,47 @@ Work:
    - run as an unprivileged user where compatible with the compiler images
    - cap compiler stdout and stderr retained in responses
    - distinguish user compilation errors from compiler/container infrastructure failures
+   - treat nonzero Docker lifecycle and staging exits as infrastructure failures with capped diagnostics
 
 2. Add output limits to runtime execution.
    - stop retaining unbounded stdout or stderr in memory
    - return a clear output-limit verdict or infrastructure error
+   - cancel the execution and restart the reusable sandbox after an output-limit breach
 
 3. Add a small admission limiter for `POST /run`.
    - cap concurrent direct runs independently of the worker pool
    - return `429 Too Many Requests` or `503 Service Unavailable` when saturated
    - preserve `/submissions` as the scalable path for normal judging
+   - keep admission independent from queued submissions and compatible with a one-sandbox pool
 
 4. Add basic request protections.
-   - strict JSON decoding that rejects trailing values and unknown fields if desired
-   - request IDs and structured errors
+   - strict JSON decoding that rejects trailing values and unknown fields
+   - reject request bodies over 1 MiB
+   - return request IDs and structured JSON errors
    - authentication and per-user rate limits only when the application has users
+
+5. Harden reusable sandbox lifecycle.
+   - verify bounded readiness after startup and every restart before reuse
+   - do not reset a sandbox twice when execution already restarted it
+   - replace sandboxes when reset or readiness checks fail
+   - persist terminal infrastructure failures as structured `infrastructure_error` results
 
 Definition of done:
 
 - compilation and execution both run with explicit resource and network restrictions
 - oversized output cannot exhaust server memory
 - repeated `/run` requests cannot starve queued submissions or consume all sandboxes indefinitely
+- API/Docker acceptance passes repeatedly with the documented Postgres URL and leaves no disposable test sandboxes
+- Phase 4 remains responsible for recovering submissions left in `running` after a process crash
+
+Verification completed on 2026-08-21:
+
+- `GOCACHE=/tmp/yexjudge-go-cache go test ./...`
+- `GOCACHE=/tmp/yexjudge-go-cache go test -race ./...`
+- `GOCACHE=/tmp/yexjudge-go-cache go vet ./...`
+- Postgres-backed `go test ./internal/judge -count=1`
+- Three consecutive `TestAPIIntegration` runs against the provided Postgres URL, Docker images, one worker, and one sandbox
+- No running disposable `yexjudge-*` test sandboxes remained; the existing Postgres container was not changed
 
 ## Phase 4: Make the Durable Queue Recoverable
 
@@ -299,7 +341,9 @@ Definition of done:
 - the server remains responsive during a burst larger than its sandbox pool
 - sandbox loss and graceful shutdown do not permanently reduce usable capacity
 
-## Phase 7: Add Conservative Adaptive Capacity
+## Phase 7: Add Conservative Adaptive Capacity — deferred
+
+Status: intentionally deferred until after the resume-ready Phase 9 milestone. Fixed worker, sandbox, and compile capacity from Phase 6 is sufficient for the first production version.
 
 Goal: adjust capacity according to load without destabilizing the host.
 
@@ -371,7 +415,9 @@ Definition of done:
 - deployment can detect when the process is alive but not safe to accept submissions
 - performance claims are backed by a repeatable local benchmark
 
-## Phase 10: Add Deferred Language Backends and Resolve Go Support
+## Phase 10: Add Deferred Language Backends and Resolve Go Support — deferred
+
+Status: intentionally deferred until after the C++-first resume-ready milestone. Python and Java stdin/stdout support remain available, but their Function/Class backends will not be added during the current delivery target. Go receives no new driver work while its keep/remove decision remains open.
 
 Precondition: complete the C++ custom runtime types, Class/Interactive decisions, execution hardening, queue recovery, observability, capacity, and production-delivery work above.
 
