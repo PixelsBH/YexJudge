@@ -2,6 +2,7 @@ package judge
 
 import (
 	"encoding/json"
+	"time"
 
 	"yexjudge/internal/judge/harness"
 )
@@ -116,10 +117,14 @@ type RunOutput struct {
 }
 
 type Submission struct {
-	ID     string           `json:"id"`
-	Job    Job              `json:"job"`
-	Status SubmissionStatus `json:"status"`
-	Result *Result          `json:"result,omitempty"`
+	ID             string           `json:"id"`
+	Job            Job              `json:"job"`
+	Status         SubmissionStatus `json:"status"`
+	Result         *Result          `json:"result,omitempty"`
+	StartedAt      *time.Time       `json:"startedAt,omitempty"`
+	AttemptCount   int              `json:"attemptCount"`
+	LeaseExpiresAt *time.Time       `json:"leaseExpiresAt,omitempty"`
+	FailureMessage string           `json:"failureMessage,omitempty"`
 }
 
 type SubmissionAcceptedResponse struct {

@@ -8,33 +8,42 @@ import (
 )
 
 const (
-	defaultPort            = "8080"
-	defaultWorkerCount     = 4
-	defaultSandboxPoolSize = 4
-	defaultQueuePollMs     = 500
-	defaultSubmitTimeoutMs = 10000
-	defaultRunConcurrency  = 2
+	defaultPort             = "8080"
+	defaultWorkerCount      = 4
+	defaultSandboxPoolSize  = 4
+	defaultQueuePollMs      = 500
+	defaultQueueLeaseMs     = 60000
+	defaultQueueRecoveryMs  = 1000
+	defaultQueueMaxAttempts = 3
+	defaultSubmitTimeoutMs  = 10000
+	defaultRunConcurrency   = 2
 )
 
 type config struct {
-	port            string
-	workerCount     int
-	sandboxPoolSize int
-	databaseURL     string
-	queuePoll       time.Duration
-	submitTimeout   time.Duration
-	runConcurrency  int
+	port             string
+	workerCount      int
+	sandboxPoolSize  int
+	databaseURL      string
+	queuePoll        time.Duration
+	queueLease       time.Duration
+	queueRecovery    time.Duration
+	queueMaxAttempts int
+	submitTimeout    time.Duration
+	runConcurrency   int
 }
 
 func loadConfig() config {
 	return config{
-		port:            getEnv("PORT", defaultPort),
-		workerCount:     getEnvInt("WORKER_COUNT", defaultWorkerCount),
-		sandboxPoolSize: getEnvInt("SANDBOX_POOL_SIZE", defaultSandboxPoolSize),
-		databaseURL:     getEnv("DATABASE_URL", ""),
-		queuePoll:       time.Duration(getEnvInt("QUEUE_POLL_INTERVAL_MS", defaultQueuePollMs)) * time.Millisecond,
-		submitTimeout:   time.Duration(getEnvInt("SUBMIT_TIMEOUT_MS", defaultSubmitTimeoutMs)) * time.Millisecond,
-		runConcurrency:  getEnvInt("RUN_CONCURRENCY", defaultRunConcurrency),
+		port:             getEnv("PORT", defaultPort),
+		workerCount:      getEnvInt("WORKER_COUNT", defaultWorkerCount),
+		sandboxPoolSize:  getEnvInt("SANDBOX_POOL_SIZE", defaultSandboxPoolSize),
+		databaseURL:      getEnv("DATABASE_URL", ""),
+		queuePoll:        time.Duration(getEnvInt("QUEUE_POLL_INTERVAL_MS", defaultQueuePollMs)) * time.Millisecond,
+		queueLease:       time.Duration(getEnvInt("QUEUE_LEASE_MS", defaultQueueLeaseMs)) * time.Millisecond,
+		queueRecovery:    time.Duration(getEnvInt("QUEUE_RECOVERY_INTERVAL_MS", defaultQueueRecoveryMs)) * time.Millisecond,
+		queueMaxAttempts: getEnvInt("QUEUE_MAX_ATTEMPTS", defaultQueueMaxAttempts),
+		submitTimeout:    time.Duration(getEnvInt("SUBMIT_TIMEOUT_MS", defaultSubmitTimeoutMs)) * time.Millisecond,
+		runConcurrency:   getEnvInt("RUN_CONCURRENCY", defaultRunConcurrency),
 	}
 }
 

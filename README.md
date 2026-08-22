@@ -97,6 +97,12 @@ Then create the table:
 psql 'postgres://postgres:postgres@localhost:5432/yexjudge?sslmode=disable' -f db/submissions.sql
 ```
 
+For an existing database, apply queue lease columns and the recovery backfill:
+
+```bash
+psql 'postgres://postgres@localhost:5432/yexjudge?sslmode=disable' -f db/migrations/002_queue_leases.sql
+```
+
 ## Run the Server
 
 From the project root, using Postgres:
@@ -119,6 +125,9 @@ WORKER_COUNT=4
 SANDBOX_POOL_SIZE=4
 DATABASE_URL=postgres://postgres@localhost:5432/yexjudge?sslmode=disable
 QUEUE_POLL_INTERVAL_MS=500
+QUEUE_LEASE_MS=60000
+QUEUE_RECOVERY_INTERVAL_MS=1000
+QUEUE_MAX_ATTEMPTS=3
 SUBMIT_TIMEOUT_MS=10000
 RUN_CONCURRENCY=2
 ```
@@ -347,6 +356,8 @@ After processing, the status should become:
 
 - `finished`
 - `failed`
+
+Workers claim submissions with a lease. The claim increments `attemptCount`; heartbeats and final updates are fenced to that attempt. Expired leases are requeued until `QUEUE_MAX_ATTEMPTS` is reached, then stored as `failed` with an `infrastructure_error` result. Lease recovery runs at startup and periodically, so a crashed worker does not strand a submission in `running`.
 
 Example accepted response:
 

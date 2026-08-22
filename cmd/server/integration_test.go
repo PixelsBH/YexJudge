@@ -57,6 +57,38 @@ func TestAPIIntegration(t *testing.T) {
 	port := listener.Addr().(*net.TCPAddr).Port
 	_ = listener.Close()
 
+	staleID := fmt.Sprintf("phase4-stale-%d", time.Now().UnixNano())
+	staleJob := judge.Job{
+		Language:   "python",
+		SourceCode: "print(3 + 4)",
+		TestCases:  []judge.TestCase{{ID: 1, ExpectedOutput: "7"}},
+		Limits:     judge.Limits{TimeLimitMs: 1000, MemoryLimitMb: 128},
+	}
+	staleJobJSON, err := json.Marshal(staleJob)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("pgx", databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`
+		INSERT INTO submissions
+		(id, status, job, attempt_count, started_at, lease_expires_at, failure_message)
+		VALUES ($1, $2, $3, 1, NOW() - INTERVAL '2 minutes', NOW() - INTERVAL '1 second', $4)
+		on conflict (id) do nothing`, staleID, judge.SubmissionRunning, staleJobJSON, "test worker interrupted"); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	_ = db.Close()
+	t.Cleanup(func() {
+		cleanupDB, openErr := sql.Open("pgx", databaseURL)
+		if openErr == nil {
+			_, _ = cleanupDB.Exec(`DELETE FROM submissions WHERE id = $1`, staleID)
+			_ = cleanupDB.Close()
+		}
+	})
+
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	server := exec.CommandContext(ctx, binaryPath)
@@ -94,6 +126,13 @@ func TestAPIIntegration(t *testing.T) {
 	baseURL := fmt.Sprintf("http://127.0.0.1:%d", port)
 	client := &http.Client{Timeout: 5 * time.Second}
 	waitForHealth(t, client, baseURL+"/health", &serverLog)
+
+	t.Run("startup recovers stale running submission", func(t *testing.T) {
+		result := waitForIntegrationSubmission(t, client, baseURL+"/submissions/"+staleID, &serverLog)
+		if result.Status != judge.SubmissionFinished || result.Result == nil || result.Result.Status != judge.Accepted {
+			t.Fatalf("recovered result = %+v, want finished accepted; log:\n%s", result, serverLog.String())
+		}
+	})
 
 	var submissionIDs []string
 	t.Cleanup(func() {

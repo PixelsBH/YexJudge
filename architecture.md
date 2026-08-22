@@ -45,6 +45,9 @@ flowchart TD
     Validate --> Store[Save Submission as queued]
     Store --> Queue[Postgres-backed Submission Queue]
     Queue --> Worker[In-process Worker Pool]
+    Queue -->|Lease recovery| Recovery[Requeue expired or fail exhausted attempts]
+    Queue --> Claim[Atomic claim with attempt and lease]
+    Claim --> Worker
     Worker --> Service[Judge Service]
     Service --> Registry[Language Registry]
     Service --> Workspace[Create Workspace]
@@ -70,7 +73,7 @@ flowchart TD
     AC --> Reset[Restart, readiness-check, and reset Sandbox]
     Reset -->|Reset/readiness failure| Replace
     Reset --> Release
-    Client -->|POST /run| RunAdmission[/run admission semaphore]
+    Client -->|POST /run| RunAdmission[run admission semaphore]
     RunAdmission -->|Capacity full| TooMany[429 structured error]
     RunAdmission --> Service
     Client -->|GET /submissions/id| Fetch[Submission Endpoint]
@@ -173,8 +176,10 @@ Current behavior:
 - submissions are stored in the `submissions` table
 - job payloads and results are stored as JSONB
 - workers claim queued submissions with `FOR UPDATE SKIP LOCKED`
-- claiming changes a submission from `queued` to `running`
-- completed submissions are updated to `finished` with a result payload
+- claiming changes a submission from `queued` to `running`, increments `attempt_count`, and sets `started_at` and `lease_expires_at`
+- workers renew the lease while processing; renewals and final updates are fenced by `attempt_count`
+- expired leases are requeued up to the configured retry limit, then become `failed` with an `infrastructure_error` result
+- completed judge verdicts are updated to `finished` with a result payload
 
 `DATABASE_URL` is required so the server always uses the durable path.
 
@@ -220,9 +225,8 @@ The shared `yexjudge-runtime:latest` image must be built locally before starting
 ### Current Limitations
 
 - a fresh compile container is still created per compiled submission
-- there is no worker recovery or retry model yet
-- submissions already claimed as `running` are not recovered after a crash yet
-- Postgres schema changes are applied manually through `db/submissions.sql`
+- retries are bounded by `QUEUE_MAX_ATTEMPTS` and use the queue lease metadata
+- Postgres schema changes are applied through `db/submissions.sql` and numbered migration files
 
 ## Target Architecture
 

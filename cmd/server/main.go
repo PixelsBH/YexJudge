@@ -103,7 +103,7 @@ func startWorker(ctx context.Context, workerID int) {
 			default:
 			}
 
-			submissionID, err := submissionQueue.Dequeue(ctx)
+			claim, err := submissionQueue.Dequeue(ctx)
 			if err != nil {
 				if ctx.Err() != nil {
 					return
@@ -112,17 +112,72 @@ func startWorker(ctx context.Context, workerID int) {
 				continue
 			}
 
-			submission, ok := submissionStore.Get(submissionID)
+			submission, ok := submissionStore.Get(claim.ID)
 			if !ok {
-				log.Println("worker", workerID, "submission not found in store:", submissionID)
+				log.Println("worker", workerID, "submission not found in store:", claim.ID)
+				continue
+			}
+			if submission.AttemptCount != claim.Attempt {
+				log.Println("worker", workerID, "submission claim attempt mismatch:", claim.ID, claim.Attempt, submission.AttemptCount)
 				continue
 			}
 			if submission.Status != judge.SubmissionQueued && submission.Status != judge.SubmissionRunning {
-				log.Println("worker", workerID, "skipping submission with status:", submissionID, submission.Status)
+				log.Println("worker", workerID, "skipping submission with status:", claim.ID, submission.Status)
 				continue
 			}
+			log.Println("worker", workerID, "processing submission", claim.ID, "attempt", claim.Attempt)
+			leaseCtx, cancelLease := context.WithCancel(ctx)
+			leaseDone := make(chan struct{})
+			go renewSubmissionLease(leaseCtx, claim, leaseDone)
 			if _, err := judgeService.ProcessSubmission(ctx, submission); err != nil {
-				log.Println("worker", workerID, "failed to process submission:", submissionID, err)
+				log.Println("worker", workerID, "failed to process submission:", claim.ID, err)
+			}
+			cancelLease()
+			<-leaseDone
+		}
+	}()
+}
+
+func renewSubmissionLease(ctx context.Context, claim judge.SubmissionClaim, done chan<- struct{}) {
+	defer close(done)
+	interval := submissionQueue.LeaseDuration() / 3
+	if interval < time.Millisecond {
+		interval = time.Millisecond
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := submissionQueue.RenewLease(ctx, claim); err != nil {
+				log.Println("failed to renew submission lease:", claim.ID, err)
+				return
+			}
+		}
+	}
+}
+
+func startLeaseRecovery(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		interval = time.Second
+	}
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				recovered, err := submissionQueue.RecoverExpired(ctx)
+				if err != nil {
+					log.Println("failed to recover expired submissions:", err)
+				} else if recovered > 0 {
+					log.Println("recovered expired submissions:", recovered)
+				}
 			}
 		}
 	}()
@@ -186,6 +241,12 @@ func main() {
 
 	workerCtx, cancelWorkers := context.WithCancel(context.Background())
 	defer cancelWorkers()
+	if recovered, err := submissionQueue.RecoverExpired(context.Background()); err != nil {
+		log.Fatal("failed to recover expired submissions:", err)
+	} else if recovered > 0 {
+		log.Println("recovered expired submissions at startup:", recovered)
+	}
+	startLeaseRecovery(workerCtx, cfg.queueRecovery)
 
 	for i := 1; i <= cfg.workerCount; i++ {
 		startWorker(workerCtx, i)
@@ -258,7 +319,12 @@ func buildPersistence(cfg config) (judge.SubmissionStore, judge.SubmissionQueue,
 	log.Println("using Postgres store and queue")
 
 	store := judge.NewPostgresSubmissionStore(db)
-	queue := judge.NewPostgresSubmissionQueue(db, cfg.queuePoll)
+	queue := judge.NewPostgresSubmissionQueueWithOptions(
+		db,
+		cfg.queuePoll,
+		cfg.queueLease,
+		cfg.queueMaxAttempts,
+	)
 
 	cleanup := func() {
 		if err := db.Close(); err != nil {

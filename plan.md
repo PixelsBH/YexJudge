@@ -251,6 +251,8 @@ Verification completed on 2026-08-21:
 
 ## Phase 4: Make the Durable Queue Recoverable
 
+Status: **complete** for the current Postgres-backed worker architecture.
+
 Goal: ensure a server or worker crash cannot strand submissions forever.
 
 Work:
@@ -259,14 +261,17 @@ Work:
    - add `started_at`, `attempt_count`, `lease_expires_at`, and failure metadata
    - keep `db/submissions.sql` or its migrations synchronized with the store and queue code
    - introduce migration files instead of manually editing one schema file
+   - use an attempt counter and failure message as the ownership/failure fence
 
 2. Claim jobs with a lease.
    - a worker atomically claims `queued` work and sets a lease deadline
    - a worker extends the lease while processing long jobs if needed
+   - fence renewals and final updates by the claimed attempt number
 
 3. Recover expired work at startup and periodically.
    - requeue jobs with expired leases up to a retry limit
    - mark jobs failed after the retry limit, with a clear infrastructure error message
+   - preserve retry metadata and make terminal recovery failures visible in the stored result
 
 4. Make status transitions explicit.
    - `queued -> running -> finished`
@@ -278,6 +283,16 @@ Definition of done:
 - killing a worker during a job does not leave that job permanently `running`
 - concurrent workers still cannot process the same attempt twice
 - retry behavior is visible in the stored submission metadata and logs
+
+Verification completed on 2026-08-22:
+
+- Postgres lease, retry, recovery, claim-uniqueness, and stale-attempt fencing tests passed.
+- Startup recovery was verified end to end by inserting an expired `running` submission before the API server started; it was requeued and completed.
+- Three consecutive `TestAPIIntegration` runs passed with one worker and one runtime sandbox.
+- `GOCACHE=/tmp/yexjudge-go-cache go test ./...` passed.
+- `GOCACHE=/tmp/yexjudge-go-cache go test -race ./...` passed.
+- `GOCACHE=/tmp/yexjudge-go-cache go vet ./...` passed.
+- No running disposable `yexjudge-*` containers remained, and the existing Postgres container was not changed.
 
 ## Phase 5: Add Operational Visibility
 
