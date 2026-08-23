@@ -187,45 +187,9 @@ The endpoint exposes aggregate state only; it does not return source code or sub
 
 ## Submit Code
 
-Submit a Python solution:
+The main documented submission path is C++. Conventional stdin/stdout submissions are supported for C, Python, Go, and Java as well, but the metadata-driven LeetCode-style Function/Class system currently supports C++ only.
 
-```bash
-curl -X POST http://localhost:8080/submissions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "language": "python",
-    "sourceCode": "a, b = map(int, input().split())\nprint(a + b)",
-    "testCases": [
-      {
-        "id": 1,
-        "input": "2 3",
-        "expectedOutput": "5"
-      },
-      {
-        "id": 2,
-        "input": "10 20",
-        "expectedOutput": "30"
-      }
-    ],
-    "limits": {
-      "timeLimitMs": 1000,
-      "memoryLimitMb": 128
-    }
-  }'
-```
-
-Example response:
-
-```json
-{
-  "submissionId": "1780000000000000000",
-  "status": "queued"
-}
-```
-
-Copy the returned `submissionId`.
-
-For a combined workflow, use `POST /submit` with the same JSON payload. A completed judge result is returned directly. If processing exceeds `SUBMIT_TIMEOUT_MS`, the endpoint returns `202` with a submission ID and `Location`; poll `GET /submissions/{id}` only in that case.
+For a combined workflow, use `POST /submit` with the submission payload shown in the C++ example below. A completed judge result is returned directly. If processing exceeds `SUBMIT_TIMEOUT_MS`, the endpoint returns `202` with a submission ID and `Location`; poll `GET /submissions/{id}` only in that case.
 
 ## Submit Function-Style Code
 
@@ -263,6 +227,42 @@ curl -X POST http://localhost:8080/submissions \
         "id": 2,
         "args": [[3, 2, 4], 6],
         "expected": [1, 2]
+      }
+    ],
+    "limits": {
+      "timeLimitMs": 1000,
+      "memoryLimitMb": 128
+    }
+  }'
+```
+
+### Tree Function Example: Maximum Path Sum
+
+Function Mode also supports registered runtime types such as `TreeNode*`. The judge constructs the tree from the JSON argument and compares the scalar result returned by the submitted recursive method.
+
+```bash
+curl -X POST http://localhost:8080/submissions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "language": "cpp",
+    "sourceCode": "class Solution {\npublic:\n    int maxPathSum(TreeNode* root) {\n        int maxSum = INT_MIN;\n        pathSum(root, maxSum);\n        return maxSum;\n    }\n    int pathSum(TreeNode* root, int& maxSum) {\n        if (!root) return 0;\n        int left = max(0, pathSum(root->left, maxSum));\n        int right = max(0, pathSum(root->right, maxSum));\n        maxSum = max(maxSum, left + right + root->val);\n        return root->val + max(left, right);\n    }\n};",
+    "function": {
+      "name": "maxPathSum",
+      "returnType": "int",
+      "params": [
+        { "name": "root", "type": "TreeNode*" }
+      ]
+    },
+    "testCases": [
+      {
+        "id": 1,
+        "args": [[-10, 9, 20, null, null, 15, 7]],
+        "expected": 42
+      },
+      {
+        "id": 2,
+        "args": [[-3]],
+        "expected": -3
       }
     ],
     "limits": {
@@ -396,7 +396,7 @@ Use these values in the `language` field:
 - `go` (legacy stdin/stdout support; no Function Mode backend planned)
 - `java`
 
-LeetCode-style Function Mode currently targets C++ only. Python and Java Function/Class Mode support are deferred until the C++ roadmap is complete. The eventual status of the existing Go option will be decided separately; no new Go feature work is planned.
+The C++ implementation is the current project focus. C, Python, Go, and Java can run conventional stdin/stdout submissions, but their LeetCode-style Function/Class backends are future work and are not documented as fully supported yet.
 
 ## C++ Example
 
@@ -420,21 +420,21 @@ curl -X POST http://localhost:8080/submissions \
   }'
 ```
 
-## Java Example
+## Python Example
 
-Java submissions must define a `Main` class:
+Python is currently supported for conventional stdin/stdout submissions. It does not yet support the metadata-driven Function/Class system shown in the C++ examples.
 
 ```bash
 curl -X POST http://localhost:8080/submissions \
   -H "Content-Type: application/json" \
   -d '{
-    "language": "java",
-    "sourceCode": "import java.util.*; public class Main { public static void main(String[] args) { Scanner sc = new Scanner(System.in); int a = sc.nextInt(); int b = sc.nextInt(); System.out.println(a + b); } }",
+    "language": "python",
+    "sourceCode": "a, b = map(int, input().split())\nprint(a + b)",
     "testCases": [
       {
         "id": 1,
-        "input": "8 9",
-        "expectedOutput": "17"
+        "input": "4 7",
+        "expectedOutput": "11"
       }
     ],
     "limits": {
