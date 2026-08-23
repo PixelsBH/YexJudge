@@ -2,10 +2,11 @@ package judge
 
 import (
 	"context"
+	"log/slog"
 	"os"
-	"strings"
 	"time"
 	"yexjudge/internal/judge/languages"
+	"yexjudge/internal/observability"
 )
 
 type Service struct {
@@ -13,124 +14,48 @@ type Service struct {
 	pool     SandboxPool
 	store    SubmissionStore
 	registry *languages.Registry
+	metrics  *observability.Metrics
 }
 
 func NewService(executor Executor, pool SandboxPool, store SubmissionStore, registry *languages.Registry) *Service {
+	return NewServiceWithMetrics(executor, pool, store, registry, observability.NewMetrics())
+}
+
+func NewServiceWithMetrics(executor Executor, pool SandboxPool, store SubmissionStore, registry *languages.Registry, metrics *observability.Metrics) *Service {
+	if metrics == nil {
+		metrics = observability.NewMetrics()
+	}
 	return &Service{
 		executor: executor,
 		pool:     pool,
 		store:    store,
 		registry: registry,
+		metrics:  metrics,
 	}
 }
 
-func (s *Service) RunCode(ctx context.Context, job Job) (RunOutput, error) {
-	if job.Function != nil || job.Class != nil {
-		return RunOutput{
-			Status:       ValidationError,
-			ErrorMessage: "driver modes are not supported by /run; use /submit",
-		}, nil
-	}
-
-	spec, ok := s.registry.Get(job.Language)
-	if !ok {
-		return RunOutput{
-			Status:       ValidationError,
-			ErrorMessage: "unsupported language",
-		}, nil
-	}
-
-	workspace, err := createWorkspace(job, spec)
-	if err != nil {
-		return RunOutput{}, err
-	}
-	defer os.RemoveAll(workspace)
-
-	if spec.NeedsCompile() {
-		compileRes, err := s.executor.Compile(ctx, workspace, spec, job.Limits)
-		if err != nil {
-			return RunOutput{}, err
-		}
-		if ctx.Err() != nil {
-			return RunOutput{
-				Status:       InfrastructureError,
-				ErrorMessage: "compile execution was canceled",
-			}, nil
-		}
-		if compileRes.TimedOut {
-			return RunOutput{
-				Status:       InfrastructureError,
-				ErrorOutput:  compileRes.Stderr,
-				ErrorMessage: "compile container exceeded the compiler time limit",
-			}, nil
-		}
-		if compileRes.OutputLimitExceeded {
-			return RunOutput{
-				Status:       OutputLimitExceeded,
-				ErrorOutput:  compileRes.Stderr,
-				ErrorMessage: "compiler output exceeded the allowed limit",
-			}, nil
-		}
-		if compileRes.ExitCode == 125 {
-			return RunOutput{
-				Status:       InfrastructureError,
-				ErrorOutput:  compileRes.Stderr,
-				ErrorMessage: "compile container failed to start",
-			}, nil
-		}
-		if compileRes.ExitCode != 0 {
-			return RunOutput{
-				Status:       CompilationError,
-				ErrorOutput:  compileRes.Stderr,
-				ErrorMessage: compileRes.Stderr,
-			}, nil
-		}
-	}
-
-	sandbox, err := s.pool.Acquire(ctx, job.Limits)
-	if err != nil {
-		return RunOutput{}, err
-	}
-	defer s.pool.Release(sandbox)
-
-	if err := s.executor.PrepareSandbox(ctx, sandbox, workspace); err != nil {
-		return RunOutput{}, err
-	}
-
-	ctxRun, cancelRun := context.WithTimeout(ctx, time.Duration(job.Limits.TimeLimitMs)*time.Millisecond)
-	defer cancelRun()
-
-	runRes, err := s.executor.RunTestCase(ctxRun, sandbox, "", spec)
-	if err != nil {
-		return RunOutput{}, err
-	}
-	if ctx.Err() != nil {
-		return RunOutput{
-			Status:       InfrastructureError,
-			ErrorMessage: "program execution was canceled",
-		}, nil
-	}
-
-	output := RunOutput{
-		Status:    Accepted,
-		Output:    strings.TrimSpace(runRes.Stdout),
-		RuntimeMs: int(runRes.TimeUsed.Milliseconds()),
-	}
-	if runRes.OutputLimitExceeded {
-		output.Status = OutputLimitExceeded
-		output.ErrorMessage = "program output exceeded the allowed limit"
-	} else if runRes.TimedOut {
-		output.Status = TimeLimitExceeded
-	} else if runRes.ExitCode != 0 {
-		output.Status = RuntimeError
-		output.ErrorOutput = strings.TrimSpace(runRes.Stderr)
-		output.ErrorMessage = output.ErrorOutput
-	}
-
-	return output, nil
-}
+func (s *Service) Metrics() *observability.Metrics { return s.metrics }
 
 func (s *Service) ProcessSubmission(ctx context.Context, submission Submission) (Result, error) {
+	processingStarted := time.Now()
+	workerID := WorkerID(ctx)
+	slog.Info("submission processing started",
+		"submission_id", submission.ID,
+		"language", submission.Job.Language,
+		"worker_id", workerID,
+		"attempt", submission.AttemptCount,
+		"status", submission.Status,
+	)
+	defer func() {
+		slog.Info("submission processing finished",
+			"submission_id", submission.ID,
+			"language", submission.Job.Language,
+			"worker_id", workerID,
+			"attempt", submission.AttemptCount,
+			"status", submission.Status,
+			"duration_ms", time.Since(processingStarted).Milliseconds(),
+		)
+	}()
 	if err := ValidateJob(submission.Job); err != nil {
 		result := Result{
 			Status:       ValidationError,
@@ -169,6 +94,14 @@ func (s *Service) ProcessSubmission(ctx context.Context, submission Submission) 
 		}
 		submission.Status = SubmissionFailed
 		submission.Result = &result
+		submission.FailureMessage = message
+		slog.Error("submission infrastructure failure",
+			"submission_id", submission.ID,
+			"language", submission.Job.Language,
+			"worker_id", workerID,
+			"attempt", submission.AttemptCount,
+			"error", message,
+		)
 		if err := s.store.Update(submission); err != nil {
 			return Result{}, err
 		}
@@ -182,7 +115,16 @@ func (s *Service) ProcessSubmission(ctx context.Context, submission Submission) 
 	defer os.RemoveAll(workspace)
 
 	if spec.NeedsCompile() {
+		compileStarted := time.Now()
 		compileRes, err := s.executor.Compile(ctx, workspace, spec, submission.Job.Limits)
+		compileDuration := time.Since(compileStarted)
+		s.metrics.ObserveCompile(compileDuration)
+		slog.Info("submission compile finished",
+			"submission_id", submission.ID,
+			"language", submission.Job.Language,
+			"worker_id", workerID,
+			"duration_ms", compileDuration.Milliseconds(),
+		)
 		if err != nil {
 			return infrastructureFailure("compile execution: " + err.Error())
 		}
@@ -227,17 +169,47 @@ func (s *Service) ProcessSubmission(ctx context.Context, submission Submission) 
 		}
 	}
 
+	acquireStarted := time.Now()
 	sandbox, err := s.pool.Acquire(ctx, submission.Job.Limits)
+	acquireDuration := time.Since(acquireStarted)
+	s.metrics.ObserveAcquire(acquireDuration)
+	slog.Info("sandbox acquired",
+		"submission_id", submission.ID,
+		"language", submission.Job.Language,
+		"worker_id", workerID,
+		"duration_ms", acquireDuration.Milliseconds(),
+	)
 	if err != nil {
 		return infrastructureFailure("acquire sandbox: " + err.Error())
 	}
 	defer s.pool.Release(sandbox)
 
+	stagingStarted := time.Now()
 	if err := s.executor.PrepareSandbox(ctx, sandbox, workspace); err != nil {
+		s.metrics.ObserveStaging(time.Since(stagingStarted))
 		return infrastructureFailure("prepare sandbox: " + err.Error())
 	}
+	stagingDuration := time.Since(stagingStarted)
+	s.metrics.ObserveStaging(stagingDuration)
+	slog.Info("sandbox staging finished",
+		"submission_id", submission.ID,
+		"language", submission.Job.Language,
+		"worker_id", workerID,
+		"duration_ms", stagingDuration.Milliseconds(),
+	)
 
+	testcaseStarted := time.Now()
 	result, err := runTestCases(ctx, s.executor, sandbox, submission.Job, spec)
+	testcaseDuration := time.Since(testcaseStarted)
+	s.metrics.ObserveTestcase(testcaseDuration)
+	s.metrics.ObserveRuntime(time.Duration(result.RuntimeMs) * time.Millisecond)
+	slog.Info("submission testcases finished",
+		"submission_id", submission.ID,
+		"language", submission.Job.Language,
+		"worker_id", workerID,
+		"duration_ms", testcaseDuration.Milliseconds(),
+		"runtime_ms", result.RuntimeMs,
+	)
 	if err != nil {
 		return infrastructureFailure("run test cases: " + err.Error())
 	}

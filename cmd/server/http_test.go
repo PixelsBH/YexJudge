@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -20,7 +19,7 @@ func TestDecodeJSONBodyRejectsUnknownAndTrailingValues(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			recorder := httptest.NewRecorder()
-			request := httptest.NewRequest(http.MethodPost, "/run", strings.NewReader(test.body))
+			request := httptest.NewRequest(http.MethodPost, "/submit", strings.NewReader(test.body))
 			var destination struct {
 				Language string `json:"language"`
 			}
@@ -39,7 +38,7 @@ func TestDecodeJSONBodyRejectsOversizedRequests(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(
 		http.MethodPost,
-		"/run",
+		"/submit",
 		strings.NewReader(`{"language":"`+strings.Repeat("x", maxRequestBodyBytes)+`"}`),
 	)
 	var destination map[string]any
@@ -71,35 +70,5 @@ func TestRequestIDMiddlewareReturnsSafeRequestID(t *testing.T) {
 	handler.ServeHTTP(invalidRecorder, invalid)
 	if got := invalidRecorder.Header().Get("X-Request-ID"); got == "" || got == "bad request id" {
 		t.Fatalf("invalid request ID was not replaced: %q", got)
-	}
-}
-
-func TestRunHandlerReturnsStructuredAdmissionError(t *testing.T) {
-	previousAdmission := runAdmission
-	runAdmission = make(chan struct{}, 1)
-	runAdmission <- struct{}{}
-	defer func() { runAdmission = previousAdmission }()
-
-	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/run", strings.NewReader(`{
-		"language":"python",
-		"sourceCode":"print(1)",
-		"limits":{"timeLimitMs":1000,"memoryLimitMb":128}
-	}`))
-	request.Header.Set("X-Request-ID", "admission-test")
-
-	requestIDMiddleware(http.HandlerFunc(runHandler)).ServeHTTP(recorder, request)
-	if recorder.Code != http.StatusTooManyRequests {
-		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusTooManyRequests)
-	}
-	if got := recorder.Header().Get("X-Request-ID"); got != "admission-test" {
-		t.Fatalf("request ID = %q, want admission-test", got)
-	}
-	var response apiErrorResponse
-	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
-		t.Fatalf("decode error response: %v", err)
-	}
-	if response.Error.Code != "run_capacity_exhausted" || response.Error.RequestID != "admission-test" {
-		t.Fatalf("error response = %+v, want structured admission error", response)
 	}
 }

@@ -9,8 +9,8 @@ The current API is asynchronous:
 - `POST /submissions` creates a submission and returns a submission ID.
 - `GET /submissions/{id}` fetches the current submission status and final result.
 - `POST /submit` creates a submission and waits up to 10 seconds for the final result. If it times out, it returns `202` with the submission ID and `Location` header.
-- `POST /run` executes code once with raw stdin and returns its output without checking test cases or creating a stored submission.
 - `GET /health` checks whether the server is running.
+- `GET /diagnostics` returns local operational counts, worker/sandbox utilization, and bounded latency histograms.
 
 Compatibility route:
 
@@ -129,14 +129,12 @@ QUEUE_LEASE_MS=60000
 QUEUE_RECOVERY_INTERVAL_MS=1000
 QUEUE_MAX_ATTEMPTS=3
 SUBMIT_TIMEOUT_MS=10000
-RUN_CONCURRENCY=2
 ```
 
 Phase 3 execution limits and API behavior:
 
 - JSON request bodies are limited to 1 MiB and use strict decoding: unknown fields and trailing JSON values are rejected with `400`.
 - Every response includes an `X-Request-ID`; a valid client-supplied ID is preserved. API errors use `{ "error": { "code", "message", "requestId" } }`.
-- `/run` has independent admission controlled by `RUN_CONCURRENCY` (default `2`). A full direct-run budget returns `429`; queued `/submissions` are not counted against it.
 - Compiler and runtime stdout/stderr are each capped at 64 KiB. Exceeding the cap cancels execution and produces `output_limit_exceeded`.
 - Docker compile, start, update, exec, restart, and staging failures are infrastructure failures. Terminal async jobs persist `infrastructure_error` with a capped diagnostic rather than silently losing the result.
 - Compile containers run without network access, with bounded CPU, memory, PIDs, filesystem access, and an unprivileged user. Runtime sandboxes use the shared `yexjudge-runtime:latest` image with the same restrictions.
@@ -166,36 +164,17 @@ In another terminal:
 curl http://localhost:8080/health
 ```
 
-## Run Code
+## Diagnostics
 
-To execute code once without test cases, use `POST /run`:
+For local operational visibility:
 
 ```bash
-curl -X POST http://localhost:8080/run \
-  -H "Content-Type: application/json" \
-  -d '{
-    "language": "python",
-    "sourceCode": "a, b = 4, 7\nprint(a + b)",
-    "limits": {
-      "timeLimitMs": 1000,
-      "memoryLimitMb": 128
-    }
-  }'
+curl http://localhost:8080/diagnostics
 ```
 
-Example response:
+The response includes queued/running/failed submission counts, busy workers, available/busy runtime sandboxes, and cumulative latency histograms for queue wait, compilation, sandbox acquisition, staging, testcase/runtime execution, and sandbox reset. Logs are JSON structured events containing submission ID, language, worker ID, attempt, status transitions, and phase durations.
 
-```json
-{
-  "status": "accepted",
-  "output": "11",
-  "runtimeMs": 4
-}
-```
-
-`/run` currently supports source code that does not require external input. Initialize values inside the submitted program. Use `/submit` for LeetCode-style function submissions.
-
-Direct `/run` requests are admitted separately from queued submissions. When the configured `RUN_CONCURRENCY` capacity is full, the endpoint returns `429`. Program and compiler stdout/stderr are capped; exceeding the cap returns `output_limit_exceeded`.
+The endpoint exposes aggregate state only; it does not return source code or submission results. Authentication for deployments with users remains future work.
 
 ## Submit Code
 
@@ -237,7 +216,7 @@ Example response:
 
 Copy the returned `submissionId`.
 
-For a single-request workflow, use `POST /submit` with the same JSON payload. A completed judge result is returned directly. The wait limit can be changed with `SUBMIT_TIMEOUT_MS`; after the limit, use `GET /submissions/{id}` with the returned ID.
+For a combined workflow, use `POST /submit` with the same JSON payload. A completed judge result is returned directly. If processing exceeds `SUBMIT_TIMEOUT_MS`, the endpoint returns `202` with a submission ID and `Location`; poll `GET /submissions/{id}` only in that case.
 
 ## Submit Function-Style Code
 
@@ -480,7 +459,7 @@ YEXJUDGE_TEST_DATABASE_URL='postgres://postgres@localhost:5432/yexjudge?sslmode=
   go test ./internal/judge -count=1
 ```
 
-Run the opt-in API/Docker integration test as well. It builds a temporary server binary, starts it against Postgres and the local Docker images, and verifies `/submissions`, `/submit`, `/run`, and compilation errors:
+Run the opt-in API/Docker integration test as well. It builds a temporary server binary, starts it against Postgres and the local Docker images, and verifies `/submissions`, `/submit`, `/diagnostics`, and compilation errors:
 
 ```bash
 YEXJUDGE_TEST_DATABASE_URL='postgres://postgres@localhost:5432/yexjudge?sslmode=disable' \

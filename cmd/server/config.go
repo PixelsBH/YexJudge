@@ -16,7 +16,6 @@ const (
 	defaultQueueRecoveryMs  = 1000
 	defaultQueueMaxAttempts = 3
 	defaultSubmitTimeoutMs  = 10000
-	defaultRunConcurrency   = 2
 )
 
 type config struct {
@@ -29,7 +28,6 @@ type config struct {
 	queueRecovery    time.Duration
 	queueMaxAttempts int
 	submitTimeout    time.Duration
-	runConcurrency   int
 }
 
 func loadConfig() config {
@@ -43,7 +41,6 @@ func loadConfig() config {
 		queueRecovery:    time.Duration(getEnvInt("QUEUE_RECOVERY_INTERVAL_MS", defaultQueueRecoveryMs)) * time.Millisecond,
 		queueMaxAttempts: getEnvInt("QUEUE_MAX_ATTEMPTS", defaultQueueMaxAttempts),
 		submitTimeout:    time.Duration(getEnvInt("SUBMIT_TIMEOUT_MS", defaultSubmitTimeoutMs)) * time.Millisecond,
-		runConcurrency:   getEnvInt("RUN_CONCURRENCY", defaultRunConcurrency),
 	}
 }
 

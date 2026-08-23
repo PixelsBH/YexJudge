@@ -2,7 +2,9 @@ package judge
 
 import (
 	"context"
-	"log"
+	"log/slog"
+	"time"
+	"yexjudge/internal/observability"
 )
 
 type SandboxPool interface {
@@ -13,9 +15,14 @@ type SandboxPool interface {
 type ExecutorSandboxPool struct {
 	executor  Executor
 	available chan *Sandbox
+	metrics   *observability.Metrics
 }
 
 func NewExecutorSandboxPool(executor Executor, sandboxes []*Sandbox) *ExecutorSandboxPool {
+	return NewExecutorSandboxPoolWithMetrics(executor, sandboxes, nil)
+}
+
+func NewExecutorSandboxPoolWithMetrics(executor Executor, sandboxes []*Sandbox, metrics *observability.Metrics) *ExecutorSandboxPool {
 	available := make(chan *Sandbox, len(sandboxes))
 	for _, sandbox := range sandboxes {
 		available <- sandbox
@@ -24,6 +31,22 @@ func NewExecutorSandboxPool(executor Executor, sandboxes []*Sandbox) *ExecutorSa
 	return &ExecutorSandboxPool{
 		executor:  executor,
 		available: available,
+		metrics:   metrics,
+	}
+}
+
+type PoolStats struct {
+	Total     int `json:"total"`
+	Available int `json:"available"`
+	Busy      int `json:"busy"`
+}
+
+func (p *ExecutorSandboxPool) Stats() PoolStats {
+	available := len(p.available)
+	return PoolStats{
+		Total:     cap(p.available),
+		Available: available,
+		Busy:      cap(p.available) - available,
 	}
 }
 
@@ -56,10 +79,17 @@ func (p *ExecutorSandboxPool) Release(sandbox *Sandbox) {
 		return
 	}
 
+	resetStarted := time.Now()
 	if err := p.executor.ResetSandbox(context.Background(), sandbox); err != nil {
-		log.Println("failed to reset reusable sandbox, replacing it:", err)
+		if p.metrics != nil {
+			p.metrics.ObserveReset(time.Since(resetStarted))
+		}
+		slog.Error("failed to reset reusable sandbox, replacing it", "sandbox", sandbox.ContainerName, "error", err)
 		p.replace(sandbox)
 		return
+	}
+	if p.metrics != nil {
+		p.metrics.ObserveReset(time.Since(resetStarted))
 	}
 
 	p.available <- sandbox
@@ -69,7 +99,7 @@ func (p *ExecutorSandboxPool) replace(sandbox *Sandbox) {
 	p.executor.RemoveSandbox(sandbox)
 	replacement, err := p.executor.StartSandbox(context.Background())
 	if err != nil {
-		log.Println("failed to replace reusable sandbox:", err)
+		slog.Error("failed to replace reusable sandbox", "sandbox", sandbox.ContainerName, "error", err)
 		return
 	}
 	p.available <- replacement

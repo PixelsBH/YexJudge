@@ -12,6 +12,16 @@ type SubmissionStore interface {
 	Update(sub Submission) error
 }
 
+type SubmissionCounts struct {
+	Queued  int64 `json:"queued"`
+	Running int64 `json:"running"`
+	Failed  int64 `json:"failed"`
+}
+
+type SubmissionStatsProvider interface {
+	Counts() (SubmissionCounts, error)
+}
+
 type PostgresSubmissionStore struct {
 	db *sql.DB
 }
@@ -49,7 +59,7 @@ func (s *PostgresSubmissionStore) Save(sub Submission) error {
 
 func (s *PostgresSubmissionStore) Get(id string) (Submission, bool) {
 	row := s.db.QueryRow(
-		`SELECT id, status, job, result, started_at, attempt_count,
+		`SELECT id, status, job, result, created_at, started_at, attempt_count,
 		        lease_expires_at, failure_message
 		 FROM submissions
 		 WHERE id = $1`,
@@ -59,6 +69,7 @@ func (s *PostgresSubmissionStore) Get(id string) (Submission, bool) {
 	var sub Submission
 	var jobJSON []byte
 	var resultJSON sql.NullString
+	var createdAt sql.NullTime
 	var startedAt sql.NullTime
 	var leaseExpiresAt sql.NullTime
 	var failureMessage sql.NullString
@@ -68,6 +79,7 @@ func (s *PostgresSubmissionStore) Get(id string) (Submission, bool) {
 		&sub.Status,
 		&jobJSON,
 		&resultJSON,
+		&createdAt,
 		&startedAt,
 		&sub.AttemptCount,
 		&leaseExpiresAt,
@@ -93,6 +105,9 @@ func (s *PostgresSubmissionStore) Get(id string) (Submission, bool) {
 	}
 	if startedAt.Valid {
 		sub.StartedAt = &startedAt.Time
+	}
+	if createdAt.Valid {
+		sub.CreatedAt = &createdAt.Time
 	}
 	if leaseExpiresAt.Valid {
 		sub.LeaseExpiresAt = &leaseExpiresAt.Time
@@ -144,6 +159,21 @@ func (s *PostgresSubmissionStore) Update(sub Submission) error {
 		return fmt.Errorf("submission %q lease or attempt is no longer owned", sub.ID)
 	}
 	return nil
+}
+
+func (s *PostgresSubmissionStore) Counts() (SubmissionCounts, error) {
+	var counts SubmissionCounts
+	err := s.db.QueryRow(
+		`SELECT
+			COUNT(*) FILTER (WHERE status = $1),
+			COUNT(*) FILTER (WHERE status = $2),
+			COUNT(*) FILTER (WHERE status = $3)
+		 FROM submissions`,
+		SubmissionQueued,
+		SubmissionRunning,
+		SubmissionFailed,
+	).Scan(&counts.Queued, &counts.Running, &counts.Failed)
+	return counts, err
 }
 
 func marshalResult(result *Result) ([]byte, error) {

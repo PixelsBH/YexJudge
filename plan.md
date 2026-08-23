@@ -12,7 +12,6 @@ Already implemented:
 
 - asynchronous `POST /submissions` with `GET /submissions/{id}` result retrieval
 - synchronous `POST /submit` convenience endpoint with a bounded wait
-- synchronous `POST /run` for source code with no user-provided stdin
 - Postgres-backed submission persistence and queue claiming with `FOR UPDATE SKIP LOCKED`
 - fixed in-process worker pool
 - fixed pool of reusable Docker runtime sandboxes
@@ -28,7 +27,6 @@ Current architectural constraints:
 - compile containers are created per compiled submission
 - workers poll Postgres for queued jobs
 - jobs left in `running` after a crash are not recovered
-- `/run` bypasses the submission queue and should remain a development-oriented convenience endpoint until it has admission control
 - opt-in Postgres store/queue integration tests exist behind `YEXJUDGE_TEST_DATABASE_URL`
 - opt-in API/Docker integration tests cover the server lifecycle and core routes
 
@@ -185,7 +183,7 @@ Work:
 5. Add API integration tests against a temporary database and Docker runtime image.
    - `POST /submissions` then polling result
    - `POST /submit` completed response and timeout response
-   - `POST /run` success, compilation error, runtime error, and timeout
+   - `GET /diagnostics` aggregate operational response
 
 Definition of done:
 
@@ -193,7 +191,7 @@ Definition of done:
 - a documented integration command verifies Docker and Postgres behavior locally
 - regressions in function drivers, queue claims, and result serialization are caught automatically
 
-## Phase 3: Harden Execution and Admission Control
+## Phase 3: Harden Execution
 
 Status: **complete** for the current API and Docker execution scope.
 
@@ -214,19 +212,13 @@ Work:
    - return a clear output-limit verdict or infrastructure error
    - cancel the execution and restart the reusable sandbox after an output-limit breach
 
-3. Add a small admission limiter for `POST /run`.
-   - cap concurrent direct runs independently of the worker pool
-   - return `429 Too Many Requests` or `503 Service Unavailable` when saturated
-   - preserve `/submissions` as the scalable path for normal judging
-   - keep admission independent from queued submissions and compatible with a one-sandbox pool
-
-4. Add basic request protections.
+3. Add basic request protections.
    - strict JSON decoding that rejects trailing values and unknown fields
    - reject request bodies over 1 MiB
    - return request IDs and structured JSON errors
    - authentication and per-user rate limits only when the application has users
 
-5. Harden reusable sandbox lifecycle.
+4. Harden reusable sandbox lifecycle.
    - verify bounded readiness after startup and every restart before reuse
    - do not reset a sandbox twice when execution already restarted it
    - replace sandboxes when reset or readiness checks fail
@@ -236,7 +228,7 @@ Definition of done:
 
 - compilation and execution both run with explicit resource and network restrictions
 - oversized output cannot exhaust server memory
-- repeated `/run` requests cannot starve queued submissions or consume all sandboxes indefinitely
+- all execution requests use the durable worker path and cannot bypass queue fairness
 - API/Docker acceptance passes repeatedly with the documented Postgres URL and leaves no disposable test sandboxes
 - Phase 4 remains responsible for recovering submissions left in `running` after a process crash
 
@@ -296,12 +288,15 @@ Verification completed on 2026-08-22:
 
 ## Phase 5: Add Operational Visibility
 
+Status: **complete** for the current single-process deployment.
+
 Goal: make performance and failures explainable before adding automatic scaling.
 
 Work:
 
 1. Add structured logs.
    - submission ID, language, worker ID, status transitions, compile time, runtime, and infrastructure failures
+   - emit JSON logs through the standard library `slog` handler
 
 2. Measure the important timings.
    - queue wait duration
@@ -310,20 +305,34 @@ Work:
    - staging duration
    - testcase execution duration
    - sandbox reset duration
+   - retain bounded cumulative histograms in process memory
 
 3. Expose lightweight metrics or a protected diagnostics endpoint.
    - queued/running/failed submission counts
    - busy and available sandbox counts
    - worker busy count
    - runtime and compile latency histograms
+   - expose the aggregate snapshot through `GET /diagnostics`
 
 4. Update `architecture.md` and `README.md` whenever a behavior or public route changes.
-   - Correct the current `/run` wording: it executes with empty stdin, not raw user stdin.
+   - document `POST /submit` as the combined convenience endpoint; it returns `200` when complete and `202` with an ID when polling is required.
 
 Definition of done:
 
 - a slow submission can be traced from API receipt to final result
 - sandbox loss, queue backlog, and compiler slowdown are visible without adding temporary debug logging
+
+Verification completed on 2026-08-23:
+
+- Structured JSON logs now cover queueing, claims, status transitions, submission identity, language, worker, attempt, infrastructure failures, and phase durations.
+- `/diagnostics` reports aggregate queued/running/failed counts, worker busy state, sandbox availability, and bounded latency histograms.
+- Queue wait, compile, sandbox acquisition, staging, testcase/runtime, and sandbox reset timings are collected and tested.
+- `GOCACHE=/tmp/yexjudge-go-cache go test ./...` passed.
+- `GOCACHE=/tmp/yexjudge-go-cache go test -race ./...` passed.
+- `GOCACHE=/tmp/yexjudge-go-cache go vet ./...` passed.
+- Postgres-backed tests passed, including lease/recovery coverage.
+- Three consecutive `TestAPIIntegration` runs passed with the diagnostics endpoint enabled.
+- No running disposable `yexjudge-*` containers remained, and the existing Postgres container was not changed.
 
 ## Phase 6: Improve Fixed Capacity First
 
@@ -474,7 +483,6 @@ Keep these principles unless a measured requirement changes them:
 - One sandbox is used for all test cases of one submission.
 - `POST /submissions` plus `GET /submissions/{id}` is the primary production API.
 - `POST /submit` is a bounded convenience API, not the high-throughput default.
-- `POST /run` is a direct execution convenience API and must be admission-limited before public exposure.
 - `POST /judge` remains a temporary compatibility alias for submission creation while clients migrate to `POST /submissions`.
 - `POST /submissions` plus `GET /submissions/{id}` remain the primary submission-oriented API.
 - Function-mode harnesses must be data-driven and adapter-based rather than a custom driver per problem.

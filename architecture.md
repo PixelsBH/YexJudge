@@ -73,11 +73,11 @@ flowchart TD
     AC --> Reset[Restart, readiness-check, and reset Sandbox]
     Reset -->|Reset/readiness failure| Replace
     Reset --> Release
-    Client -->|POST /run| RunAdmission[run admission semaphore]
-    RunAdmission -->|Capacity full| TooMany[429 structured error]
-    RunAdmission --> Service
     Client -->|GET /submissions/id| Fetch[Submission Endpoint]
     Fetch --> StoreLookup[Read Stored Submission Status and Result]
+    Client -->|GET /diagnostics| Diagnostics[Operational Diagnostics]
+    Diagnostics --> StoreLookup
+    Diagnostics --> Metrics[Metrics Snapshot]
 ```
 
 ### Current Components
@@ -90,8 +90,8 @@ Responsibilities:
 
 - receive `POST /submissions`
 - receive `POST /submit` as a bounded synchronous convenience endpoint
-- receive `POST /run` for one-off sandboxed execution without persistence, test-case comparison, or user-provided stdin
 - receive `GET /submissions/{id}`
+- receive `GET /diagnostics` for aggregate operational visibility
 - decode strict request JSON
 - enforce the 1 MiB request-size limit
 - attach or preserve a safe `X-Request-ID`
@@ -101,9 +101,8 @@ Responsibilities:
 - enqueue accepted submissions
 - return submission acceptance metadata
 - optionally wait for a bounded period and return the final result
-- execute one raw-stdin request synchronously through the existing compiler and sandbox infrastructure
-- admit `/run` independently with the bounded `RUN_CONCURRENCY` semaphore
 - return stored submission status and result
+- return submission counts, worker/sandbox utilization, and bounded latency histograms
 
 This layer should not contain compilation or execution logic.
 
@@ -196,6 +195,10 @@ Each language spec defines:
 - runtime command
 
 The registry maps a requested language string to the correct language spec. Runtime image choice is intentionally global because every reusable sandbox supports all configured languages.
+
+#### 7. Operational Metrics and Diagnostics
+
+The process maintains bounded in-memory histograms for queue wait, compile, sandbox acquisition, staging, testcase/runtime execution, and sandbox reset durations. Worker busy count and runtime-pool availability are tracked atomically. `GET /diagnostics` combines those metrics with aggregate Postgres queued/running/failed counts; structured JSON logs carry per-submission identity, worker, attempt, status, and timing fields.
 
 ### Current Supported Languages
 
@@ -356,7 +359,7 @@ Validation should exist in two places:
 - service layer as defensive validation
 
 This keeps the system safe even after multiple entrypoints or worker paths are introduced.
-Current admission and execution caps include a 1 MiB JSON request body, `RUN_CONCURRENCY` direct-run admission (default 2), 64 KiB stdout/stderr per stream, at most 10000ms per test case, and 512MB of sandbox memory. Compile containers and runtime sandboxes are network-disabled and resource-limited.
+Current admission and execution caps include a 1 MiB JSON request body, 64 KiB stdout/stderr per stream, at most 10000ms per test case, and 512MB of sandbox memory. Compile containers and runtime sandboxes are network-disabled and resource-limited. All execution goes through the durable submission queue; `POST /submit` is the bounded synchronous convenience wrapper.
 
 ### Language Strategy
 

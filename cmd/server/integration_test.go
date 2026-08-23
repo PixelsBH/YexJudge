@@ -127,6 +127,24 @@ func TestAPIIntegration(t *testing.T) {
 	client := &http.Client{Timeout: 5 * time.Second}
 	waitForHealth(t, client, baseURL+"/health", &serverLog)
 
+	t.Run("diagnostics", func(t *testing.T) {
+		response, err := client.Get(baseURL + "/diagnostics")
+		if err != nil {
+			t.Fatalf("GET /diagnostics failed: %v", err)
+		}
+		defer response.Body.Close()
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("GET /diagnostics returned %d; log:\n%s", response.StatusCode, serverLog.String())
+		}
+		var diagnostics diagnosticsResponse
+		if err := json.NewDecoder(response.Body).Decode(&diagnostics); err != nil {
+			t.Fatalf("decode diagnostics response: %v", err)
+		}
+		if diagnostics.Sandboxes.Total != 1 || diagnostics.Sandboxes.Available < 0 {
+			t.Fatalf("diagnostics sandboxes = %+v, want one configured sandbox", diagnostics.Sandboxes)
+		}
+	})
+
 	t.Run("startup recovers stale running submission", func(t *testing.T) {
 		result := waitForIntegrationSubmission(t, client, baseURL+"/submissions/"+staleID, &serverLog)
 		if result.Status != judge.SubmissionFinished || result.Result == nil || result.Result.Status != judge.Accepted {
@@ -263,45 +281,6 @@ func TestAPIIntegration(t *testing.T) {
 			t.Fatalf("class-mode response = status=%s result=%+v, want finished accepted; log:\n%s", result.Status, result.Result, serverLog.String())
 		}
 		submissionIDs = append(submissionIDs, result.ID)
-	})
-
-	t.Run("direct run", func(t *testing.T) {
-		response := postAndDecode(t, client, baseURL+"/run", map[string]any{
-			"language":   "python",
-			"sourceCode": "print(6 * 7)",
-			"limits":     map[string]any{"timeLimitMs": 1000, "memoryLimitMb": 128},
-		})
-		var result judge.RunOutput
-		decodeJSON(t, response, &result)
-		if result.Status != judge.Accepted || result.Output != "42" {
-			t.Fatalf("/run response = %+v, want accepted output 42", result)
-		}
-	})
-
-	t.Run("direct runtime error", func(t *testing.T) {
-		response := postAndDecode(t, client, baseURL+"/run", map[string]any{
-			"language":   "python",
-			"sourceCode": "raise RuntimeError('boom')",
-			"limits":     map[string]any{"timeLimitMs": 1000, "memoryLimitMb": 128},
-		})
-		var result judge.RunOutput
-		decodeJSON(t, response, &result)
-		if result.Status != judge.RuntimeError {
-			t.Fatalf("runtime error response = %+v, want runtime_error", result)
-		}
-	})
-
-	t.Run("direct timeout", func(t *testing.T) {
-		response := postAndDecode(t, client, baseURL+"/run", map[string]any{
-			"language":   "python",
-			"sourceCode": "while True: pass",
-			"limits":     map[string]any{"timeLimitMs": 100, "memoryLimitMb": 128},
-		})
-		var result judge.RunOutput
-		decodeJSON(t, response, &result)
-		if result.Status != judge.TimeLimitExceeded {
-			t.Fatalf("timeout response = %+v, want time_limit_exceeded", result)
-		}
 	})
 
 	t.Run("synchronous submit timeout", func(t *testing.T) {

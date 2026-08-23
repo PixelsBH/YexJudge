@@ -81,6 +81,9 @@ func TestPostgresSubmissionStoreIntegration(t *testing.T) {
 	if got.ID != id || got.Status != SubmissionQueued || got.Job.SourceCode != submission.Job.SourceCode {
 		t.Fatalf("saved submission = %+v, want %+v", got, submission)
 	}
+	if got.CreatedAt == nil {
+		t.Fatal("saved submission has no created timestamp")
+	}
 
 	result := Result{Status: Accepted, RuntimeMs: 4}
 	submission.Status = SubmissionFinished

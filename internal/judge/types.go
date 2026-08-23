@@ -108,15 +108,8 @@ type Result struct {
 	ErrorMessage   string    `json:"errorMessage,omitempty"`
 }
 
-type RunOutput struct {
-	Status       Status `json:"status"`
-	Output       string `json:"output,omitempty"`
-	ErrorOutput  string `json:"errorOutput,omitempty"`
-	ErrorMessage string `json:"errorMessage,omitempty"`
-	RuntimeMs    int    `json:"runtimeMs,omitempty"`
-}
-
 type Submission struct {
+	CreatedAt      *time.Time       `json:"createdAt,omitempty"`
 	ID             string           `json:"id"`
 	Job            Job              `json:"job"`
 	Status         SubmissionStatus `json:"status"`

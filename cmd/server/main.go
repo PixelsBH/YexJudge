@@ -6,13 +6,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"log/slog"
 	"net/http"
+	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
 	"yexjudge/internal/judge"
 	"yexjudge/internal/judge/languages"
+	"yexjudge/internal/observability"
 	"yexjudge/internal/runner"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -81,6 +84,11 @@ func createAndQueueSubmission(job judge.Job) (judge.Submission, error) {
 		}
 		return judge.Submission{}, err
 	}
+	slog.Info("submission queued",
+		"submission_id", submission.ID,
+		"language", job.Language,
+		"status", submission.Status,
+	)
 
 	return submission, nil
 }
@@ -122,15 +130,36 @@ func startWorker(ctx context.Context, workerID int) {
 				continue
 			}
 			if submission.Status != judge.SubmissionQueued && submission.Status != judge.SubmissionRunning {
-				log.Println("worker", workerID, "skipping submission with status:", claim.ID, submission.Status)
+				slog.Warn("worker skipped submission", "submission_id", claim.ID, "worker_id", workerID, "status", submission.Status)
 				continue
 			}
-			log.Println("worker", workerID, "processing submission", claim.ID, "attempt", claim.Attempt)
+			if runtimeMetrics != nil && submission.CreatedAt != nil {
+				runtimeMetrics.ObserveQueueWait(time.Since(*submission.CreatedAt))
+			}
+			queueWaitMs := int64(0)
+			if submission.CreatedAt != nil {
+				queueWaitMs = time.Since(*submission.CreatedAt).Milliseconds()
+			}
+			slog.Info("submission claimed",
+				"submission_id", claim.ID,
+				"language", submission.Job.Language,
+				"worker_id", workerID,
+				"attempt", claim.Attempt,
+				"from_status", submission.Status,
+				"to_status", judge.SubmissionRunning,
+				"queue_wait_ms", queueWaitMs,
+			)
 			leaseCtx, cancelLease := context.WithCancel(ctx)
 			leaseDone := make(chan struct{})
 			go renewSubmissionLease(leaseCtx, claim, leaseDone)
-			if _, err := judgeService.ProcessSubmission(ctx, submission); err != nil {
-				log.Println("worker", workerID, "failed to process submission:", claim.ID, err)
+			if runtimeMetrics != nil {
+				runtimeMetrics.WorkerStarted()
+			}
+			if _, err := judgeService.ProcessSubmission(judge.WithWorkerID(ctx, workerID), submission); err != nil {
+				slog.Error("worker failed to process submission", "submission_id", claim.ID, "worker_id", workerID, "error", err)
+			}
+			if runtimeMetrics != nil {
+				runtimeMetrics.WorkerFinished()
 			}
 			cancelLease()
 			<-leaseDone
@@ -153,7 +182,7 @@ func renewSubmissionLease(ctx context.Context, claim judge.SubmissionClaim, done
 			return
 		case <-ticker.C:
 			if err := submissionQueue.RenewLease(ctx, claim); err != nil {
-				log.Println("failed to renew submission lease:", claim.ID, err)
+				slog.Error("failed to renew submission lease", "submission_id", claim.ID, "attempt", claim.Attempt, "error", err)
 				return
 			}
 		}
@@ -174,9 +203,9 @@ func startLeaseRecovery(ctx context.Context, interval time.Duration) {
 			case <-ticker.C:
 				recovered, err := submissionQueue.RecoverExpired(ctx)
 				if err != nil {
-					log.Println("failed to recover expired submissions:", err)
+					slog.Error("failed to recover expired submissions", "error", err)
 				} else if recovered > 0 {
-					log.Println("recovered expired submissions:", recovered)
+					slog.Info("recovered expired submissions", "count", recovered)
 				}
 			}
 		}
@@ -206,9 +235,9 @@ func cleanupSandboxes(executor judge.Executor, sandboxes []*judge.Sandbox) {
 }
 
 func main() {
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
 	cfg := loadConfig()
 	submitTimeout = cfg.submitTimeout
-	runAdmission = make(chan struct{}, cfg.runConcurrency)
 	cmdRunner := &runner.DockerRunner{}
 	registry := languages.NewRegistry(
 		languages.Cpp{},
@@ -226,7 +255,9 @@ func main() {
 	}
 	defer cleanupSandboxes(executor, sandboxes)
 
-	pool := judge.NewExecutorSandboxPool(executor, sandboxes)
+	runtimeMetrics = observability.NewMetrics()
+	runtimePool = judge.NewExecutorSandboxPoolWithMetrics(executor, sandboxes, runtimeMetrics)
+	pool := runtimePool
 
 	store, queue, cleanup, err := buildPersistence(cfg)
 	if err != nil {
@@ -237,7 +268,7 @@ func main() {
 	submissionStore = store
 	submissionQueue = queue
 
-	judgeService = judge.NewService(executor, pool, store, registry)
+	judgeService = judge.NewServiceWithMetrics(executor, pool, store, registry, runtimeMetrics)
 
 	workerCtx, cancelWorkers := context.WithCancel(context.Background())
 	defer cancelWorkers()
@@ -254,7 +285,7 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", healthHandler)
-	mux.HandleFunc("/run", runHandler)
+	mux.HandleFunc("/diagnostics", diagnosticsHandler)
 	mux.HandleFunc("/judge", createSubmissionHandler)
 	mux.HandleFunc("/submissions", submissionsCollectionHandler)
 	mux.HandleFunc("/submissions/", submissionHandler)
@@ -286,11 +317,10 @@ func main() {
 		close(shutdownDone)
 	}()
 
-	log.Printf(
-		"YexJudge server running on :%s with %d workers, sandbox pool size %d",
-		cfg.port,
-		cfg.workerCount,
-		cfg.sandboxPoolSize,
+	slog.Info("server started",
+		"address", ":"+cfg.port,
+		"workers", cfg.workerCount,
+		"sandbox_pool_size", cfg.sandboxPoolSize,
 	)
 
 	err = server.ListenAndServe()
