@@ -132,7 +132,7 @@ QUEUE_MAX_ATTEMPTS=3
 SUBMIT_TIMEOUT_MS=10000
 ```
 
-Phase 6 capacity controls:
+Capacity controls and graceful shutdown:
 
 - `WORKER_COUNT` bounds concurrent queue orchestration (default `4`, allowed `1-64`).
 - `SANDBOX_POOL_SIZE` bounds concurrent runtime execution (default `4`, allowed `1-64`).
@@ -140,7 +140,7 @@ Phase 6 capacity controls:
 - Startup rejects values outside those ranges or capacity combinations reserving more than 8 GiB at the configured worst-case limits. The default reservation is 3 GiB (`4 x 512 MiB` runtime sandboxes plus `2 x 512 MiB` compile slots).
 - During graceful shutdown, the server stops accepting requests, waits for workers within the shutdown deadline, and removes all warm and replacement sandbox containers.
 
-Phase 3 execution limits and API behavior:
+Execution limits and API behavior:
 
 - JSON request bodies are limited to 1 MiB and use strict decoding: unknown fields and trailing JSON values are rejected with `400`.
 - Every response includes an `X-Request-ID`; a valid client-supplied ID is preserved. API errors use `{ "error": { "code", "message", "requestId" } }`.
@@ -181,7 +181,7 @@ For local operational visibility:
 curl http://localhost:8080/diagnostics
 ```
 
-The response includes queued/running/failed submission counts, worker busy/total capacity, compile-slot capacity, available/busy/starting runtime sandboxes, and cumulative latency histograms for queue wait, compilation, sandbox acquisition, staging, testcase/runtime execution, and sandbox reset. Logs are JSON structured events containing submission ID, language, worker ID, attempt, status transitions, and phase durations.
+The response includes queued/running/failed submission counts, worker busy/total capacity, compile-slot capacity, available/busy/starting runtime sandboxes, and cumulative latency histograms for queue wait, compilation, sandbox acquisition, staging, testcase/runtime execution, and sandbox reset. Logs are JSON structured events containing submission ID, language, worker ID, attempt, status transitions, and execution-stage durations.
 
 The endpoint exposes aggregate state only; it does not return source code or submission results. Authentication for deployments with users remains future work.
 
