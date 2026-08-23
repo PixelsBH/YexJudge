@@ -24,10 +24,14 @@ func TestDiagnosticsHandlerReturnsOperationalSnapshot(t *testing.T) {
 	previousStore := submissionStore
 	previousMetrics := runtimeMetrics
 	previousPool := runtimePool
+	previousWorkerCapacity := runtimeWorkerCapacity
+	previousCompileSlots := runtimeCompileSlots
 	defer func() {
 		submissionStore = previousStore
 		runtimeMetrics = previousMetrics
 		runtimePool = previousPool
+		runtimeWorkerCapacity = previousWorkerCapacity
+		runtimeCompileSlots = previousCompileSlots
 	}()
 
 	runtimeMetrics = observability.NewMetrics()
@@ -35,6 +39,8 @@ func TestDiagnosticsHandlerReturnsOperationalSnapshot(t *testing.T) {
 	runtimeMetrics.ObserveCompile(25 * time.Millisecond)
 	submissionStore = diagnosticsStore{}
 	runtimePool = nil
+	runtimeWorkerCapacity = 4
+	runtimeCompileSlots = 2
 
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodGet, "/diagnostics", nil)
@@ -48,6 +54,9 @@ func TestDiagnosticsHandlerReturnsOperationalSnapshot(t *testing.T) {
 	}
 	if response.Submissions.Failed != 3 || response.Workers.Busy != 1 {
 		t.Fatalf("diagnostics response = %+v, want counts and worker busy state", response)
+	}
+	if response.Workers.Total != 4 || response.Capacity.CompileSlots != 2 {
+		t.Fatalf("diagnostics capacity = %+v/%+v, want worker total 4 and compile slots 2", response.Workers, response.Capacity)
 	}
 	if response.Timings["compile"].Count != 1 {
 		t.Fatalf("compile timing = %+v, want one observation", response.Timings["compile"])

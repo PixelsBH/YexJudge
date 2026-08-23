@@ -51,7 +51,8 @@ flowchart TD
     Worker --> Service[Judge Service]
     Service --> Registry[Language Registry]
     Service --> Workspace[Create Workspace]
-    Service --> Compile[Compile in restricted container]
+    Service --> CompileSlots[Acquire compile slot]
+    CompileSlots --> Compile[Compile in restricted container]
     Compile -->|User compiler exit| CE[Store compilation_error]
     Compile -->|Docker/timeout failure| IE[Store infrastructure_error]
     Compile -->|Success or skipped| Acquire[Acquire Universal Sandbox]
@@ -117,7 +118,7 @@ Responsibilities:
 - resolve the language spec
 - create the workspace
 - generate a C++ function harness when a job uses LeetCode-style function mode
-- compile if the language requires compilation
+- acquire a bounded compile slot and compile if the language requires compilation
 - acquire a sandbox
 - run all test cases
 - map execution results into judge verdicts
@@ -162,6 +163,8 @@ Current behavior:
 - `Release` restarts the container to terminate remaining processes and clear temporary workspace state, then waits for readiness
 - if execution already restarted a sandbox, release returns it without a second reset
 - failed reset/readiness checks remove the old container and start a replacement
+- replacement provisioning retries until capacity is restored, without reducing the configured pool size silently
+- `Close` removes available, busy, and replacement sandboxes during graceful shutdown
 - all returned sandboxes are readiness-checked before reuse
 
 The custom runtime image is based on Debian slim and includes Python and a Java runtime. Compilers remain outside runtime sandboxes.
@@ -198,7 +201,11 @@ The registry maps a requested language string to the correct language spec. Runt
 
 #### 7. Operational Metrics and Diagnostics
 
-The process maintains bounded in-memory histograms for queue wait, compile, sandbox acquisition, staging, testcase/runtime execution, and sandbox reset durations. Worker busy count and runtime-pool availability are tracked atomically. `GET /diagnostics` combines those metrics with aggregate Postgres queued/running/failed counts; structured JSON logs carry per-submission identity, worker, attempt, status, and timing fields.
+The process maintains bounded in-memory histograms for queue wait, compile, sandbox acquisition, staging, testcase/runtime execution, and sandbox reset durations. Worker busy count, worker capacity, compile-slot capacity, and runtime-pool availability are tracked. `GET /diagnostics` combines those metrics with aggregate Postgres queued/running/failed counts; structured JSON logs carry per-submission identity, worker, attempt, and timing fields.
+
+#### 8. Fixed Capacity Controls
+
+Worker count, runtime sandbox count, and compile slots are separate bounded resources. Compiled submissions acquire a compile slot before creating their one-off compiler container; interpreted submissions can continue using worker capacity without waiting for compiler slots. Configuration validation rejects values outside the supported ranges and rejects worst-case runtime/compile memory reservations above the configured 8 GiB budget. Adaptive scaling remains deferred.
 
 ### Current Supported Languages
 
@@ -378,7 +385,7 @@ The current implementation supports that path for C++ only. It is intentionally 
 
 The current `ExecutorSandboxPool` borrows warm universal sandboxes and returns them after a restart plus bounded readiness check. Timeout/output-limit execution restarts the sandbox immediately and marks it so release does not double-reset it. Failed reset/readiness checks remove the old container and replace it; graceful server shutdown removes the startup-created pool containers.
 
-Future hardening should add failure recovery for lost pool capacity and durable worker coordination.
+Future hardening should add production health/readiness checks and deployment packaging; fixed pool-capacity recovery and durable queue coordination are already implemented.
 
 ## Summary
 

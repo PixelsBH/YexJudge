@@ -10,20 +10,28 @@ import (
 )
 
 var (
-	runtimeMetrics *observability.Metrics
-	runtimePool    *judge.ExecutorSandboxPool
+	runtimeMetrics        *observability.Metrics
+	runtimePool           *judge.ExecutorSandboxPool
+	runtimeWorkerCapacity int
+	runtimeCompileSlots   int
 )
 
 type diagnosticsResponse struct {
 	Timestamp   time.Time                                  `json:"timestamp"`
 	Submissions judge.SubmissionCounts                     `json:"submissions"`
+	Capacity    diagnosticsCapacity                        `json:"capacity"`
 	Workers     diagnosticsWorkers                         `json:"workers"`
 	Sandboxes   judge.PoolStats                            `json:"sandboxes"`
 	Timings     map[string]observability.HistogramSnapshot `json:"timings"`
 }
 
 type diagnosticsWorkers struct {
-	Busy int64 `json:"busy"`
+	Busy  int64 `json:"busy"`
+	Total int   `json:"total"`
+}
+
+type diagnosticsCapacity struct {
+	CompileSlots int `json:"compileSlots"`
 }
 
 func diagnosticsHandler(w http.ResponseWriter, r *http.Request) {
@@ -57,7 +65,8 @@ func diagnosticsHandler(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(diagnosticsResponse{
 		Timestamp:   time.Now().UTC(),
 		Submissions: counts,
-		Workers:     diagnosticsWorkers{Busy: snapshot.WorkerBusy},
+		Capacity:    diagnosticsCapacity{CompileSlots: runtimeCompileSlots},
+		Workers:     diagnosticsWorkers{Busy: snapshot.WorkerBusy, Total: runtimeWorkerCapacity},
 		Sandboxes:   poolStats,
 		Timings:     snapshot.Timings,
 	})

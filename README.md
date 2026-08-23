@@ -123,6 +123,7 @@ Optional environment variables:
 PORT=8080
 WORKER_COUNT=4
 SANDBOX_POOL_SIZE=4
+COMPILE_SLOTS=2
 DATABASE_URL=postgres://postgres@localhost:5432/yexjudge?sslmode=disable
 QUEUE_POLL_INTERVAL_MS=500
 QUEUE_LEASE_MS=60000
@@ -130,6 +131,14 @@ QUEUE_RECOVERY_INTERVAL_MS=1000
 QUEUE_MAX_ATTEMPTS=3
 SUBMIT_TIMEOUT_MS=10000
 ```
+
+Phase 6 capacity controls:
+
+- `WORKER_COUNT` bounds concurrent queue orchestration (default `4`, allowed `1-64`).
+- `SANDBOX_POOL_SIZE` bounds concurrent runtime execution (default `4`, allowed `1-64`).
+- `COMPILE_SLOTS` independently bounds concurrent Docker compiler containers (default `2`, allowed `1-16`). Interpreted submissions do not consume compile slots.
+- Startup rejects values outside those ranges or capacity combinations reserving more than 8 GiB at the configured worst-case limits. The default reservation is 3 GiB (`4 x 512 MiB` runtime sandboxes plus `2 x 512 MiB` compile slots).
+- During graceful shutdown, the server stops accepting requests, waits for workers within the shutdown deadline, and removes all warm and replacement sandbox containers.
 
 Phase 3 execution limits and API behavior:
 
@@ -140,7 +149,7 @@ Phase 3 execution limits and API behavior:
 - Compile containers run without network access, with bounded CPU, memory, PIDs, filesystem access, and an unprivileged user. Runtime sandboxes use the shared `yexjudge-runtime:latest` image with the same restrictions.
 - Reusable sandboxes are readiness-checked after startup and restart. An execution-triggered restart is not reset a second time by pool release; failed reset/readiness checks replace that sandbox.
 
-Authentication and per-user rate limiting are deferred because the current service has no user/account model. Recovery of submissions left in `running` after a process crash is Phase 4.
+Authentication and per-user rate limiting are deferred because the current service has no user/account model. Submissions left in `running` after a process crash are recovered through bounded leases and retries.
 
 Expected log:
 
@@ -172,7 +181,7 @@ For local operational visibility:
 curl http://localhost:8080/diagnostics
 ```
 
-The response includes queued/running/failed submission counts, busy workers, available/busy runtime sandboxes, and cumulative latency histograms for queue wait, compilation, sandbox acquisition, staging, testcase/runtime execution, and sandbox reset. Logs are JSON structured events containing submission ID, language, worker ID, attempt, status transitions, and phase durations.
+The response includes queued/running/failed submission counts, worker busy/total capacity, compile-slot capacity, available/busy/starting runtime sandboxes, and cumulative latency histograms for queue wait, compilation, sandbox acquisition, staging, testcase/runtime execution, and sandbox reset. Logs are JSON structured events containing submission ID, language, worker ID, attempt, status transitions, and phase durations.
 
 The endpoint exposes aggregate state only; it does not return source code or submission results. Authentication for deployments with users remains future work.
 

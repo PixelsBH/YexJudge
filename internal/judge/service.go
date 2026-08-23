@@ -15,6 +15,7 @@ type Service struct {
 	store    SubmissionStore
 	registry *languages.Registry
 	metrics  *observability.Metrics
+	compile  *CompileLimiter
 }
 
 func NewService(executor Executor, pool SandboxPool, store SubmissionStore, registry *languages.Registry) *Service {
@@ -22,6 +23,10 @@ func NewService(executor Executor, pool SandboxPool, store SubmissionStore, regi
 }
 
 func NewServiceWithMetrics(executor Executor, pool SandboxPool, store SubmissionStore, registry *languages.Registry, metrics *observability.Metrics) *Service {
+	return NewServiceWithMetricsAndCompileSlots(executor, pool, store, registry, metrics, 1)
+}
+
+func NewServiceWithMetricsAndCompileSlots(executor Executor, pool SandboxPool, store SubmissionStore, registry *languages.Registry, metrics *observability.Metrics, compileSlots int) *Service {
 	if metrics == nil {
 		metrics = observability.NewMetrics()
 	}
@@ -31,6 +36,7 @@ func NewServiceWithMetrics(executor Executor, pool SandboxPool, store Submission
 		store:    store,
 		registry: registry,
 		metrics:  metrics,
+		compile:  NewCompileLimiter(compileSlots),
 	}
 }
 
@@ -115,6 +121,11 @@ func (s *Service) ProcessSubmission(ctx context.Context, submission Submission) 
 	defer os.RemoveAll(workspace)
 
 	if spec.NeedsCompile() {
+		if err := s.compile.Acquire(ctx); err != nil {
+			return infrastructureFailure("acquire compile slot: " + err.Error())
+		}
+		defer s.compile.Release()
+
 		compileStarted := time.Now()
 		compileRes, err := s.executor.Compile(ctx, workspace, spec, submission.Job.Limits)
 		compileDuration := time.Since(compileStarted)

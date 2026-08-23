@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -102,8 +103,10 @@ func submissionsCollectionHandler(w http.ResponseWriter, r *http.Request) {
 	writeAPIError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 }
 
-func startWorker(ctx context.Context, workerID int) {
+func startWorker(ctx context.Context, workerID int, workers *sync.WaitGroup) {
+	workers.Add(1)
 	go func() {
+		defer workers.Done()
 		for {
 			select {
 			case <-ctx.Done():
@@ -236,8 +239,13 @@ func cleanupSandboxes(executor judge.Executor, sandboxes []*judge.Sandbox) {
 
 func main() {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
-	cfg := loadConfig()
+	cfg, err := loadConfig()
+	if err != nil {
+		log.Fatal("invalid configuration:", err)
+	}
 	submitTimeout = cfg.submitTimeout
+	runtimeWorkerCapacity = cfg.workerCount
+	runtimeCompileSlots = cfg.compileSlots
 	cmdRunner := &runner.DockerRunner{}
 	registry := languages.NewRegistry(
 		languages.Cpp{},
@@ -257,6 +265,7 @@ func main() {
 
 	runtimeMetrics = observability.NewMetrics()
 	runtimePool = judge.NewExecutorSandboxPoolWithMetrics(executor, sandboxes, runtimeMetrics)
+	defer runtimePool.Close()
 	pool := runtimePool
 
 	store, queue, cleanup, err := buildPersistence(cfg)
@@ -268,10 +277,11 @@ func main() {
 	submissionStore = store
 	submissionQueue = queue
 
-	judgeService = judge.NewServiceWithMetrics(executor, pool, store, registry, runtimeMetrics)
+	judgeService = judge.NewServiceWithMetricsAndCompileSlots(executor, pool, store, registry, runtimeMetrics, cfg.compileSlots)
 
 	workerCtx, cancelWorkers := context.WithCancel(context.Background())
 	defer cancelWorkers()
+	var workers sync.WaitGroup
 	if recovered, err := submissionQueue.RecoverExpired(context.Background()); err != nil {
 		log.Fatal("failed to recover expired submissions:", err)
 	} else if recovered > 0 {
@@ -280,7 +290,7 @@ func main() {
 	startLeaseRecovery(workerCtx, cfg.queueRecovery)
 
 	for i := 1; i <= cfg.workerCount; i++ {
-		startWorker(workerCtx, i)
+		startWorker(workerCtx, i, &workers)
 	}
 
 	mux := http.NewServeMux()
@@ -304,15 +314,27 @@ func main() {
 		<-sigCtx.Done()
 		log.Println("shutdown signal received")
 
-		cancelWorkers()
-		submissionQueue.Close()
-
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
 		if err := server.Shutdown(shutdownCtx); err != nil {
 			log.Println("server shutdown error:", err)
 		}
+
+		cancelWorkers()
+		submissionQueue.Close()
+		workersDone := make(chan struct{})
+		go func() {
+			workers.Wait()
+			close(workersDone)
+		}()
+		select {
+		case <-workersDone:
+			log.Println("workers stopped")
+		case <-shutdownCtx.Done():
+			log.Println("worker shutdown deadline reached; removing runtime sandboxes")
+		}
+		runtimePool.Close()
 
 		close(shutdownDone)
 	}()
@@ -321,6 +343,7 @@ func main() {
 		"address", ":"+cfg.port,
 		"workers", cfg.workerCount,
 		"sandbox_pool_size", cfg.sandboxPoolSize,
+		"compile_slots", cfg.compileSlots,
 	)
 
 	err = server.ListenAndServe()

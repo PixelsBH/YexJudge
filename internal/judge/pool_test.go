@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"yexjudge/internal/judge/languages"
 	"yexjudge/internal/runner"
@@ -15,12 +16,17 @@ type poolExecutor struct {
 	removed   int
 	started   int
 	configure int
+	startErrs int
 }
 
 func (e *poolExecutor) Compile(context.Context, string, languages.Spec, Limits) (*runner.RunResult, error) {
 	return &runner.RunResult{}, nil
 }
 func (e *poolExecutor) StartSandbox(context.Context) (*Sandbox, error) {
+	if e.startErrs > 0 {
+		e.startErrs--
+		return nil, errors.New("sandbox startup failed")
+	}
 	e.started++
 	return &Sandbox{ContainerName: "replacement"}, nil
 }
@@ -103,4 +109,46 @@ func TestSandboxPoolReplacesSandboxMarkedUnhealthy(t *testing.T) {
 	if executor.resets != 0 {
 		t.Fatalf("reset calls = %d, want 0 for unhealthy sandbox replacement", executor.resets)
 	}
+}
+
+func TestSandboxPoolCloseRemovesAvailableSandboxes(t *testing.T) {
+	executor := &poolExecutor{}
+	first := &Sandbox{ContainerName: "first"}
+	second := &Sandbox{ContainerName: "second"}
+	p := NewExecutorSandboxPool(executor, []*Sandbox{first, second})
+
+	p.Close()
+	p.Close()
+
+	if executor.removed != 2 {
+		t.Fatalf("removed sandboxes = %d, want 2", executor.removed)
+	}
+	if stats := p.Stats(); stats.Total != 2 || stats.Available != 2 {
+		t.Fatalf("pool stats after close = %+v, want retained capacity accounting", stats)
+	}
+}
+
+func TestSandboxPoolRetriesReplacementWithoutLosingCapacity(t *testing.T) {
+	executor := &poolExecutor{resetErr: errors.New("sandbox did not become ready"), startErrs: 1}
+	sandbox := &Sandbox{ContainerName: "sandbox"}
+	p := NewExecutorSandboxPool(executor, []*Sandbox{sandbox})
+
+	if _, err := p.Acquire(context.Background(), Limits{MemoryLimitMb: 128}); err != nil {
+		t.Fatalf("Acquire() error = %v", err)
+	}
+	p.Release(sandbox)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	replacement, err := p.Acquire(ctx, Limits{MemoryLimitMb: 128})
+	if err != nil {
+		t.Fatalf("Acquire() after replacement retry error = %v", err)
+	}
+	if replacement.ContainerName != "replacement" {
+		t.Fatalf("replacement = %q, want replacement sandbox", replacement.ContainerName)
+	}
+	if stats := p.Stats(); stats.Total != 1 || stats.Starting != 0 {
+		t.Fatalf("pool stats after replacement = %+v, want one restored capacity slot", stats)
+	}
+	p.Release(replacement)
 }

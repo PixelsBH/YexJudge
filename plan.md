@@ -26,9 +26,11 @@ Current architectural constraints:
 
 - compile containers are created per compiled submission
 - workers poll Postgres for queued jobs
-- jobs left in `running` after a crash are not recovered
+- jobs left in `running` after a crash are recovered through bounded queue leases and retries
 - opt-in Postgres store/queue integration tests exist behind `YEXJUDGE_TEST_DATABASE_URL`
 - opt-in API/Docker integration tests cover the server lifecycle and core routes
+- fixed worker, runtime-sandbox, and compile-slot capacity controls are validated at startup
+- graceful shutdown waits for workers and removes all pool-owned runtime containers
 
 ## Current Delivery Target
 
@@ -230,7 +232,7 @@ Definition of done:
 - oversized output cannot exhaust server memory
 - all execution requests use the durable worker path and cannot bypass queue fairness
 - API/Docker acceptance passes repeatedly with the documented Postgres URL and leaves no disposable test sandboxes
-- Phase 4 remains responsible for recovering submissions left in `running` after a process crash
+- Phase 4 provides recovery for submissions left in `running` after a process crash
 
 Verification completed on 2026-08-21:
 
@@ -336,6 +338,8 @@ Verification completed on 2026-08-23:
 
 ## Phase 6: Improve Fixed Capacity First
 
+Status: **complete** for the current fixed-capacity deployment.
+
 Goal: establish safe manual capacity controls before adaptive behavior.
 
 Work:
@@ -343,12 +347,12 @@ Work:
 1. Separate the capacities conceptually.
    - worker count limits concurrent submission orchestration
    - sandbox pool size limits concurrent runtime execution
-   - compile concurrency needs its own limit because compile containers are not pooled yet
+   - compile slots independently limit one-off compiler containers because compile containers are not pooled yet
 
 2. Add configuration and validation.
    - minimum and maximum values for workers, sandboxes, and compile slots
-   - reject unsafe configurations that exceed a chosen memory budget
-   - document recommended local defaults
+   - reject unsafe configurations that exceed the 8 GiB worst-case runtime/compile reservation budget
+   - document recommended local defaults and expose configured capacity through `/diagnostics`
 
 3. Add a compile semaphore.
    - prevent a burst of compiled submissions from launching unbounded Docker compile containers
@@ -356,14 +360,27 @@ Work:
 
 4. Harden the runtime pool lifecycle.
    - clean up warm sandbox containers during graceful shutdown
-   - replace unhealthy sandboxes without silently reducing capacity
-   - keep pool capacity and worker configuration observable
+   - replace unhealthy sandboxes with retrying replacement provisioning without silently reducing capacity
+   - keep pool capacity, replacement startup, worker capacity, and compile slots observable
 
 Definition of done:
 
 - all expensive execution paths have explicit concurrency bounds
 - the server remains responsive during a burst larger than its sandbox pool
 - sandbox loss and graceful shutdown do not permanently reduce usable capacity
+
+Verification completed on 2026-08-23:
+
+- Worker, sandbox, and compile-slot configuration validation passed, including out-of-range and memory-budget rejection tests.
+- Compiled submissions acquire and release bounded compile slots; cancellation is propagated while waiting for a slot.
+- Runtime pool tests passed for replacement, no-double-reset, replacement startup tracking, and idempotent shutdown cleanup.
+- `GET /diagnostics` reports worker total/busy capacity, compile slots, and sandbox starting/available/busy state.
+- `GOCACHE=/tmp/yexjudge-go-cache go test ./...` passed.
+- `GOCACHE=/tmp/yexjudge-go-cache go test -race ./...` passed.
+- `GOCACHE=/tmp/yexjudge-go-cache go vet ./...` passed.
+- Postgres-backed `go test ./internal/judge -count=1` passed with the documented database URL.
+- Three consecutive `TestAPIIntegration` runs passed with Docker, Postgres, one worker, and one runtime sandbox.
+- No running disposable `yexjudge-*` containers remained after the acceptance run; the existing Postgres container was not changed.
 
 ## Phase 7: Add Conservative Adaptive Capacity — deferred
 
