@@ -12,13 +12,6 @@ func createWorkspace(job Job, spec languages.Spec) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	// Compile containers run as the unprivileged judge user, so the bind-mounted
-	// workspace must be traversable by that user.
-	if err := os.Chmod(workspace, 0777); err != nil {
-		os.RemoveAll(workspace)
-		return "", err
-	}
-
 	sourcePath := filepath.Join(workspace, spec.SourceFileName())
 	sourceCode := job.SourceCode
 
@@ -42,6 +35,19 @@ func createWorkspace(job Job, spec languages.Spec) (string, error) {
 	if err := os.WriteFile(sourcePath, []byte(sourceCode), 0644); err != nil {
 		os.RemoveAll(workspace)
 		return "", err
+	}
+
+	// A root server still compiles as the dedicated container user. Transfer
+	// ownership after writing the source so the workspace can remain mode 0700.
+	if os.Getuid() == 0 {
+		if err := os.Chown(workspace, 10001, 10001); err != nil {
+			os.RemoveAll(workspace)
+			return "", err
+		}
+		if err := os.Chmod(workspace, 0700); err != nil {
+			os.RemoveAll(workspace)
+			return "", err
+		}
 	}
 
 	return workspace, nil

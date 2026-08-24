@@ -152,25 +152,33 @@ func startWorker(ctx context.Context, workerID int, workers *sync.WaitGroup) {
 				"to_status", judge.SubmissionRunning,
 				"queue_wait_ms", queueWaitMs,
 			)
+			processCtx, cancelProcess := context.WithCancel(judge.WithWorkerID(ctx, workerID))
 			leaseCtx, cancelLease := context.WithCancel(ctx)
 			leaseDone := make(chan struct{})
-			go renewSubmissionLease(leaseCtx, claim, leaseDone)
+			leaseLost := make(chan error, 1)
+			go renewSubmissionLease(leaseCtx, claim, leaseDone, cancelProcess, leaseLost)
 			if runtimeMetrics != nil {
 				runtimeMetrics.WorkerStarted()
 			}
-			if _, err := judgeService.ProcessSubmission(judge.WithWorkerID(ctx, workerID), submission); err != nil {
+			if _, err := judgeService.ProcessSubmission(processCtx, submission); err != nil {
 				slog.Error("worker failed to process submission", "submission_id", claim.ID, "worker_id", workerID, "error", err)
 			}
 			if runtimeMetrics != nil {
 				runtimeMetrics.WorkerFinished()
 			}
+			cancelProcess()
 			cancelLease()
 			<-leaseDone
+			select {
+			case err := <-leaseLost:
+				slog.Warn("submission processing stopped after lease loss", "submission_id", claim.ID, "worker_id", workerID, "error", err)
+			default:
+			}
 		}
 	}()
 }
 
-func renewSubmissionLease(ctx context.Context, claim judge.SubmissionClaim, done chan<- struct{}) {
+func renewSubmissionLease(ctx context.Context, claim judge.SubmissionClaim, done chan<- struct{}, cancelProcess context.CancelFunc, leaseLost chan<- error) {
 	defer close(done)
 	interval := submissionQueue.LeaseDuration() / 3
 	if interval < time.Millisecond {
@@ -186,6 +194,11 @@ func renewSubmissionLease(ctx context.Context, claim judge.SubmissionClaim, done
 		case <-ticker.C:
 			if err := submissionQueue.RenewLease(ctx, claim); err != nil {
 				slog.Error("failed to renew submission lease", "submission_id", claim.ID, "attempt", claim.Attempt, "error", err)
+				select {
+				case leaseLost <- err:
+				default:
+				}
+				cancelProcess()
 				return
 			}
 		}
@@ -261,8 +274,6 @@ func main() {
 	if err != nil {
 		log.Fatal("failed to build sandbox pool:", err)
 	}
-	defer cleanupSandboxes(executor, sandboxes)
-
 	runtimeMetrics = observability.NewMetrics()
 	runtimePool = judge.NewExecutorSandboxPoolWithMetrics(executor, sandboxes, runtimeMetrics)
 	defer runtimePool.Close()
@@ -270,6 +281,7 @@ func main() {
 
 	store, queue, cleanup, err := buildPersistence(cfg)
 	if err != nil {
+		runtimePool.Close()
 		log.Fatal("failed to build persistence:", err)
 	}
 	defer cleanup()
@@ -283,6 +295,8 @@ func main() {
 	defer cancelWorkers()
 	var workers sync.WaitGroup
 	if recovered, err := submissionQueue.RecoverExpired(context.Background()); err != nil {
+		cleanup()
+		runtimePool.Close()
 		log.Fatal("failed to recover expired submissions:", err)
 	} else if recovered > 0 {
 		log.Println("recovered expired submissions at startup:", recovered)

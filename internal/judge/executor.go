@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -106,6 +107,13 @@ func (e *DockerExecutor) waitForSandboxReady(ctx context.Context, sandbox *Sandb
 	}
 }
 
+func compileContainerUser() string {
+	if os.Getuid() == 0 {
+		return "10001:10001"
+	}
+	return fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid())
+}
+
 func (e *DockerExecutor) Compile(ctx context.Context,
 	workspace string, spec languages.Spec, limits Limits) (*runner.RunResult, error) {
 	ctxCompile, cancel := context.WithTimeout(ctx, CompileTimeout)
@@ -139,7 +147,7 @@ func (e *DockerExecutor) Compile(ctx context.Context,
 		"--env", "GOCACHE=/tmp/go-build",
 		"--env", "GOMODCACHE=/tmp/go-mod",
 		"--ulimit", "nofile=1024:1024",
-		"--user", "10001:10001",
+		"--user", compileContainerUser(),
 		"--workdir", "/workspace",
 		"-v", workspace + ":/workspace:rw",
 		spec.CompileImage(),

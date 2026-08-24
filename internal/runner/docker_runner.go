@@ -84,6 +84,12 @@ func (d *DockerRunner) Run(ctx context.Context, input string, cmd string, args .
 	}
 
 	err := command.Wait()
+	if err != nil {
+		_, isExitError := err.(*exec.ExitError)
+		if !isExitError && !stdoutBuf.exceeded && !stderrBuf.exceeded && ctx.Err() == nil {
+			return nil, err
+		}
+	}
 
 	result := &RunResult{
 		Stdout:              stdoutBuf.String(),

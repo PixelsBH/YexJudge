@@ -139,7 +139,11 @@ func (s *PostgresSubmissionStore) Update(sub Submission) error {
 		     failure_message = $6,
 		     updated_at = NOW()
 		 WHERE id = $1
-		   AND attempt_count = $7`,
+		   AND attempt_count = $7
+		   AND (
+		       (status = 'running' AND lease_expires_at > NOW())
+		       OR (status = 'queued' AND $2 = 'failed' AND attempt_count = 0)
+		   )`,
 		sub.ID,
 		sub.Status,
 		resultJSON,

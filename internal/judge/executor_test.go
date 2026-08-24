@@ -82,7 +82,7 @@ func TestDockerExecutorCompileUsesRestrictedContainer(t *testing.T) {
 		{"--cap-drop", "ALL"},
 		{"--security-opt", "no-new-privileges"},
 		{"--read-only"},
-		{"--user", "10001:10001"},
+		{"--user", compileContainerUser()},
 		{"--workdir", "/workspace"},
 		{"--ulimit", "nofile=1024:1024"},
 	} {

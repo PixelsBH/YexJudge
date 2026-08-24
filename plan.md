@@ -193,6 +193,12 @@ Definition of done:
 - a documented integration command verifies Docker and Postgres behavior locally
 - regressions in function drivers, queue claims, and result serialization are caught automatically
 
+Host verification completed on 2026-08-24:
+
+- `YEXJUDGE_TEST_DATABASE_URL='postgres://postgres@localhost:5432/yexjudge?sslmode=disable' go test ./cmd/server -run APIIntegration -count=1 -v` passed in 43.90s.
+- The run verified diagnostics, startup recovery of a stale running submission, asynchronous polling, C/C++/Python/Go/Java stdin execution, synchronous submission, C++ Function Mode, C++ Class Mode, timeout handling, and compilation-error handling.
+- `YEXJUDGE_TEST_DATABASE_URL='postgres://postgres@localhost:5432/yexjudge?sslmode=disable' go test ./internal/judge -count=1 -v` passed in 2.17s, including store persistence, queue claim uniqueness, lease recovery, and stale-attempt fencing.
+
 ## Phase 3: Harden Execution
 
 Status: **complete** for the current API and Docker execution scope.
@@ -324,7 +330,7 @@ Definition of done:
 - a slow submission can be traced from API receipt to final result
 - sandbox loss, queue backlog, and compiler slowdown are visible without adding temporary debug logging
 
-Verification completed on 2026-08-23:
+Verification completed through 2026-08-24:
 
 - Structured JSON logs now cover queueing, claims, status transitions, submission identity, language, worker, attempt, infrastructure failures, and phase durations.
 - `/diagnostics` reports aggregate queued/running/failed counts, worker busy state, sandbox availability, and bounded latency histograms.
@@ -333,8 +339,8 @@ Verification completed on 2026-08-23:
 - `GOCACHE=/tmp/yexjudge-go-cache go test -race ./...` passed.
 - `GOCACHE=/tmp/yexjudge-go-cache go vet ./...` passed.
 - Postgres-backed tests passed, including lease/recovery coverage.
-- Three consecutive `TestAPIIntegration` runs passed with the diagnostics endpoint enabled.
-- No running disposable `yexjudge-*` containers remained, and the existing Postgres container was not changed.
+- The host API integration run on 2026-08-24 passed with the diagnostics endpoint enabled, including startup recovery, all current stdin language smoke tests, C++ Function Mode, and C++ Class Mode.
+- Disposable-container cleanup should still be checked after the acceptance run; the reported test output does not establish the final container state.
 
 ## Phase 6: Improve Fixed Capacity First
 

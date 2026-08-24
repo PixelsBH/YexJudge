@@ -97,6 +97,7 @@ func (p *ExecutorSandboxPool) Acquire(ctx context.Context, limits Limits) (*Sand
 	}
 
 	if err := p.executor.ConfigureSandbox(ctx, sandbox, limits); err != nil {
+		sandbox.needsReplace = true
 		p.Release(sandbox)
 		return nil, err
 	}
@@ -147,13 +148,6 @@ func (p *ExecutorSandboxPool) Release(sandbox *Sandbox) {
 
 func (p *ExecutorSandboxPool) replace(sandbox *Sandbox) {
 	p.removeSandbox(sandbox)
-	if replacement, err := p.startReplacement(); err == nil {
-		p.addSandbox(replacement)
-		p.returnSandbox(replacement)
-		return
-	} else {
-		slog.Error("failed to replace reusable sandbox; retrying", "sandbox", sandbox.ContainerName, "error", err)
-	}
 
 	p.mu.Lock()
 	if p.isClosingLocked() {
@@ -163,6 +157,7 @@ func (p *ExecutorSandboxPool) replace(sandbox *Sandbox) {
 	p.starting++
 	p.replaceWG.Add(1)
 	p.mu.Unlock()
+
 	go func() {
 		decrementStarting := true
 		defer p.replaceWG.Done()
@@ -183,7 +178,7 @@ func (p *ExecutorSandboxPool) replace(sandbox *Sandbox) {
 
 			replacement, err := p.startReplacement()
 			if err != nil {
-				slog.Error("failed to retry reusable sandbox replacement", "error", err)
+				slog.Error("failed to retry reusable sandbox replacement", "sandbox", sandbox.ContainerName, "error", err)
 				continue
 			}
 			p.mu.Lock()

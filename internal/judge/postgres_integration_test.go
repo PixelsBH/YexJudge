@@ -85,6 +85,20 @@ func TestPostgresSubmissionStoreIntegration(t *testing.T) {
 		t.Fatal("saved submission has no created timestamp")
 	}
 
+	queue := NewPostgresSubmissionQueueWithOptions(db, 5*time.Millisecond, time.Second, 2)
+	t.Cleanup(func() { queue.Close() })
+	claim, err := queue.Dequeue(context.Background())
+	if err != nil {
+		t.Fatalf("Dequeue() error = %v", err)
+	}
+	if claim.ID != id || claim.Attempt != 1 {
+		t.Fatalf("claim = %+v, want id %q attempt 1", claim, id)
+	}
+	submission, ok = store.Get(id)
+	if !ok {
+		t.Fatal("Get() did not find claimed submission")
+	}
+
 	result := Result{Status: Accepted, RuntimeMs: 4}
 	submission.Status = SubmissionFinished
 	submission.Result = &result
@@ -235,5 +249,41 @@ func TestPostgresStoreRejectsStaleAttemptUpdate(t *testing.T) {
 	}
 	if err := store.Update(submission); err == nil {
 		t.Fatal("Update() accepted a stale attempt")
+	}
+}
+
+func TestPostgresStoreRejectsUpdateAfterLeaseRecovery(t *testing.T) {
+	db := openIntegrationDB(t)
+	store := NewPostgresSubmissionStore(db)
+	queue := NewPostgresSubmissionQueueWithOptions(db, 5*time.Millisecond, time.Second, 2)
+	id := fmt.Sprintf("integration-recovered-fence-%d", time.Now().UnixNano())
+	t.Cleanup(func() {
+		queue.Close()
+		_, _ = db.Exec(`DELETE FROM submissions WHERE id = $1`, id)
+	})
+
+	submission := integrationSubmission(id)
+	if err := store.Save(submission); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`
+		UPDATE submissions
+		SET status = $2, attempt_count = 1, started_at = NOW() - INTERVAL '2 minutes',
+		    lease_expires_at = NOW() - INTERVAL '1 second'
+		WHERE id = $1`, id, SubmissionRunning); err != nil {
+		t.Fatal(err)
+	}
+	stale, ok := store.Get(id)
+	if !ok {
+		t.Fatal("failed to load expired submission")
+	}
+	if recovered, err := queue.RecoverExpired(context.Background()); err != nil || recovered != 1 {
+		t.Fatalf("RecoverExpired() = %d, %v; want one recovered submission", recovered, err)
+	}
+
+	stale.Status = SubmissionFinished
+	stale.Result = &Result{Status: Accepted}
+	if err := store.Update(stale); err == nil {
+		t.Fatal("Update() accepted a worker result after lease recovery")
 	}
 }

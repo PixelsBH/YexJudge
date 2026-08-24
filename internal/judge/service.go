@@ -224,6 +224,9 @@ func (s *Service) ProcessSubmission(ctx context.Context, submission Submission) 
 	if err != nil {
 		return infrastructureFailure("run test cases: " + err.Error())
 	}
+	if result.Status == InfrastructureError {
+		return infrastructureFailure(result.ErrorMessage)
+	}
 
 	submission.Status = SubmissionFinished
 	submission.Result = &result

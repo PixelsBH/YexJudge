@@ -259,7 +259,6 @@ func (q *PostgresSubmissionQueue) claimNextSubmission(ctx context.Context) (Subm
 		     attempt_count = attempt_count + 1,
 		     started_at = NOW(),
 		     lease_expires_at = NOW() + $3::interval,
-		     failure_message = NULL,
 		     updated_at = NOW()
 		 WHERE id = (
 		     SELECT id

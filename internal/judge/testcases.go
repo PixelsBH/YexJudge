@@ -34,9 +34,14 @@ func runTestCases(
 		if err != nil {
 			return Result{}, err
 		}
+		if runRes == nil {
+			return Result{}, fmt.Errorf("executor returned no run result for test case %d", tc.ID)
+		}
+		runtimeMs := int(runRes.TimeUsed.Milliseconds())
 		if ctx.Err() != nil {
 			return Result{
 				Status:         InfrastructureError,
+				RuntimeMs:      runtimeMs,
 				FailedTestCase: failedTestCase(tc, runRes.Stdout),
 				ErrorMessage:   "program execution was canceled",
 			}, nil
@@ -45,6 +50,7 @@ func runTestCases(
 		if runRes.OutputLimitExceeded {
 			return Result{
 				Status:         OutputLimitExceeded,
+				RuntimeMs:      runtimeMs,
 				FailedTestCase: failedTestCase(tc, runRes.Stdout),
 				ErrorMessage:   "program output exceeded the allowed limit",
 			}, nil
@@ -53,6 +59,7 @@ func runTestCases(
 		if runRes.TimedOut {
 			return Result{
 				Status:         TimeLimitExceeded,
+				RuntimeMs:      runtimeMs,
 				FailedTestCase: failedTestCase(tc, runRes.Stdout),
 			}, nil
 		}
@@ -60,6 +67,7 @@ func runTestCases(
 		if runRes.ExitCode != 0 {
 			return Result{
 				Status:         RuntimeError,
+				RuntimeMs:      runtimeMs,
 				FailedTestCase: failedTestCase(tc, runRes.Stdout),
 				ErrorMessage:   runRes.Stderr,
 			}, nil
@@ -75,11 +83,11 @@ func runTestCases(
 		if output != expected {
 			return Result{
 				Status:         WrongAnswer,
+				RuntimeMs:      runtimeMs,
 				FailedTestCase: failedTestCase(tc, output),
 			}, nil
 		}
 
-		runtimeMs := int(runRes.TimeUsed.Milliseconds())
 		if runtimeMs > maxRuntimeMs {
 			maxRuntimeMs = runtimeMs
 		}
