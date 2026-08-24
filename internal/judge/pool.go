@@ -77,6 +77,17 @@ func (p *ExecutorSandboxPool) Stats() PoolStats {
 	}
 }
 
+// Ready reports whether the pool has initialized capacity and is not being
+// drained or waiting for a replacement sandbox.
+func (p *ExecutorSandboxPool) Ready() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.isClosingLocked() || len(p.all) == 0 || p.starting > 0 {
+		return false
+	}
+	return true
+}
+
 func (p *ExecutorSandboxPool) Acquire(ctx context.Context, limits Limits) (*Sandbox, error) {
 	var sandbox *Sandbox
 	select {

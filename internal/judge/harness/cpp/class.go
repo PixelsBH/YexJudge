@@ -266,7 +266,13 @@ func generateClassCase(class harness.ClassSpec, testCase harness.TestCase, regis
 		fmt.Fprintf(&source, "        %s %s = %s;\n", adapter.CppType(), name, literal)
 		constructorArguments = append(constructorArguments, name)
 	}
-	fmt.Fprintf(&source, "        %s __object(%s);\n", class.Name, strings.Join(constructorArguments, ", "))
+	if len(constructorArguments) == 0 {
+		// Avoid C++'s most vexing parse: `Class __object();` is a
+		// function declaration rather than a default-constructed object.
+		fmt.Fprintf(&source, "        %s __object{};\n", class.Name)
+	} else {
+		fmt.Fprintf(&source, "        %s __object(%s);\n", class.Name, strings.Join(constructorArguments, ", "))
+	}
 	source.WriteString("        cout << \"[\";\n")
 	for operationIndex, call := range testCase.Operations {
 		if operationIndex > 0 {

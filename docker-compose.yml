@@ -1,0 +1,39 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: yexjudge
+    ports:
+      - "${POSTGRES_HOST_PORT:-5433}:5432"
+    volumes:
+      - yexjudge-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d yexjudge"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  yexjudge:
+    build:
+      context: .
+      dockerfile: docker/server/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/yexjudge?sslmode=disable
+      PORT: 8080
+      TMPDIR: ${PWD}/.yexjudge-workspaces
+    ports:
+      - "8080:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      # The host path and container path must be identical because the server
+      # asks the host Docker daemon to bind-mount compile workspaces.
+      - ${PWD}:${PWD}
+    working_dir: ${PWD}
+
+volumes:
+  yexjudge-postgres-data:

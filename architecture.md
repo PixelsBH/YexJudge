@@ -2,392 +2,326 @@
 
 ## Overview
 
-YexJudge is an online judge that now supports asynchronous submission processing in a single process, and is being shaped toward a more durable worker-based architecture with reusable execution infrastructure.
+YexJudge is an asynchronous online judge and language runtime written in Go. It accepts source-code submissions, validates and persists them in PostgreSQL, processes them through leased background workers, compiles them in restricted disposable environments, and executes them inside reusable Docker sandboxes.
 
-The project has two important architectural states:
+The implementation is intentionally driven by execution semantics and data types rather than algorithm categories or individual problem names. A new ordinary problem should require only metadata and test cases; YexJudge code changes are reserved for genuinely new execution modes or runtime data types.
 
-- the current codebase architecture
-- the intended target architecture
+The completed system is C++-first for metadata-driven LeetCode-style submissions while retaining conventional stdin/stdout support for C, C++, Python, Go, and Java.
 
-The current refactor has already established the core components needed for:
-
-- multiple languages
-- a reusable universal runtime sandbox pool
-- worker pools
-- queue-backed asynchronous execution
-- stronger API-side validation
-- a first version of LeetCode-style C++ function-mode submissions
-
-## Current Architecture
-
-Today, a submission is accepted through HTTP, stored in Postgres, claimed through a Postgres-backed queue, and processed by an in-process worker pool. Workers borrow pre-created containers from one universal runtime sandbox pool.
-
-The code is now split into these layers:
-
-- HTTP layer in [`cmd/server/main.go`](cmd/server/main.go)
-- submission retrieval endpoint in [`cmd/server/submissions.go`](cmd/server/submissions.go)
-- judge orchestration in [`internal/judge/service.go`](internal/judge/service.go)
-- execution mechanics in [`internal/judge/executor.go`](internal/judge/executor.go)
-- sandbox lifecycle abstraction in [`internal/judge/pool.go`](internal/judge/pool.go)
-- test case loop and verdicting in [`internal/judge/testcases.go`](internal/judge/testcases.go)
-- language-specific behavior in [`internal/judge/languages/spec.go`](internal/judge/languages/spec.go)
-- C++ function harness generation in [`internal/judge/cpp_function_harness.go`](internal/judge/cpp_function_harness.go)
-- Postgres submission store in [`internal/judge/postgres_store.go`](internal/judge/postgres_store.go)
-- Postgres submission queue in [`internal/judge/postgres_queue.go`](internal/judge/postgres_queue.go)
-
-### Current Flow
+## System Flow
 
 ```mermaid
 flowchart TD
-    Client[Client] -->|POST /submissions| Server[HTTP Server]
-    Server --> Decode[Decode Job]
-    Decode --> Validate[Validate Payload]
-    Validate --> Store[Save Submission as queued]
-    Store --> Queue[Postgres-backed Submission Queue]
-    Queue --> Worker[In-process Worker Pool]
-    Queue -->|Lease recovery| Recovery[Requeue expired or fail exhausted attempts]
+    Client[Client] -->|POST /submissions or /submit| API[HTTP API]
+    API --> Decode[Strict JSON decoding and request limits]
+    Decode --> Validate[Payload and mode validation]
+    Validate --> Store[Persist submission as queued]
+    Store --> Queue[Postgres queue]
     Queue --> Claim[Atomic claim with attempt and lease]
-    Claim --> Worker
-    Worker --> Service[Judge Service]
-    Service --> Registry[Language Registry]
-    Service --> Workspace[Create Workspace]
-    Service --> CompileWorkers[Submit to bounded compile-worker pool]
-    CompileWorkers --> Compile[Dedicated worker uses fresh restricted container]
-    Compile -->|User compiler exit| CE[Store compilation_error]
-    Compile -->|Docker/timeout failure| IE[Store infrastructure_error]
-    Compile -->|Success or skipped| Acquire[Acquire Universal Sandbox]
-    Acquire --> Sandbox[Sandbox Handle]
-    Sandbox --> Stage[Copy Submission Files into Sandbox]
-    Stage -->|Docker lifecycle failure| IE
-    Stage --> Execute[Run Test Cases with bounded output]
-    Execute --> Compare[Compare Output and Verdict]
-    Compare -->|Mismatch| WA[Store wrong_answer]
-    Compare -->|Timeout| TLE[Store time_limit_exceeded]
-    Compare -->|Runtime failure| RE[Store runtime_error]
-    Compare -->|All passed| AC[Store accepted]
-    WA --> Reset
-    TLE --> Reset
-    RE --> Reset
-    Execute -->|Output limit or timeout| Restart[Cancel process and restart sandbox]
-    Restart -->|Readiness failure| Replace[Replace sandbox]
-    Restart -->|Ready| Release[Return sandbox without a second reset]
-    AC --> Reset[Restart, readiness-check, and reset Sandbox]
-    Reset -->|Reset/readiness failure| Replace
-    Reset --> Release
-    Client -->|GET /submissions/id| Fetch[Submission Endpoint]
-    Fetch --> StoreLookup[Read Stored Submission Status and Result]
-    Client -->|GET /diagnostics| Diagnostics[Operational Diagnostics]
-    Diagnostics --> StoreLookup
-    Diagnostics --> Metrics[Metrics Snapshot]
+    Claim --> Worker[Submission worker]
+    Worker --> Service[Judge service]
+    Service --> Mode{Execution mode}
+    Mode -->|stdin| Workspace[Create isolated workspace]
+    Mode -->|function/class| Harness[Generate metadata-driven C++ harness]
+    Harness --> Workspace
+    Workspace --> Compile[Dedicated compile-worker pool]
+    Compile -->|Fresh restricted container| Artifact[Compiled artifact]
+    Artifact --> Sandbox[Acquire reusable runtime sandbox]
+    Workspace -->|Interpreted source| Sandbox
+    Sandbox --> Stage[Stage source or artifact]
+    Stage --> Execute[Run test cases with bounded output]
+    Execute --> Observe[Canonical observations and verdict comparison]
+    Observe --> Result[Persist final result]
+    Result --> Client
+    Queue -->|Lease recovery| Recovery[Requeue or fail expired attempts]
+    Client -->|GET /submissions/id| Result
+    Client -->|GET /health or /ready| Health[Health and readiness]
+    Client -->|GET /diagnostics| Diagnostics[Operational diagnostics]
 ```
 
-### Current Components
+## Architectural Boundaries
 
-#### 1. HTTP Layer
+### 1. HTTP API
 
-The HTTP layer is intentionally thin.
+The HTTP layer is deliberately thin. It is responsible for transport, request validation, persistence, and result retrieval—not compilation or code execution.
 
-Responsibilities:
+Supported routes:
 
-- receive `POST /submissions`
-- receive `POST /submit` as a bounded synchronous convenience endpoint
-- receive `GET /submissions/{id}`
-- receive `GET /diagnostics` for aggregate operational visibility
-- decode strict request JSON
-- enforce the 1 MiB request-size limit
-- attach or preserve a safe `X-Request-ID`
-- return structured JSON errors
-- validate obvious bad input early
-- create and store queued submissions
-- enqueue accepted submissions
-- return submission acceptance metadata
-- optionally wait for a bounded period and return the final result
-- return stored submission status and result
-- return submission counts, worker/sandbox utilization, and bounded latency histograms
+- `POST /submissions` — create an asynchronous submission and return `202` with an ID.
+- `POST /submit` — create a submission and wait for a bounded period; returns the result directly when available or `202` when polling is required.
+- `POST /judge` — compatibility alias for submission creation.
+- `GET /submissions/{id}` — retrieve status and result.
+- `GET /health` — process liveness check.
+- `GET /ready` — dependency and capacity readiness check.
+- `GET /diagnostics` — aggregate operational counts, capacity, and timing histograms.
 
-This layer should not contain compilation or execution logic.
+API protections include strict JSON decoding, rejection of unknown fields and trailing values, a `1 MiB` request limit, safe request IDs, and structured JSON errors.
 
-#### 2. Judge Service
+### 2. Judge Service
 
-The judge service is the orchestration layer.
+[`internal/judge/service.go`](internal/judge/service.go) orchestrates a claimed submission:
 
-Responsibilities:
+1. defensively validate the job
+2. resolve the language specification
+3. create a private workspace
+4. generate a mode-specific harness when required
+5. submit compilation to the dedicated compile-worker pool when required
+6. acquire and configure a runtime sandbox
+7. stage source or compiled artifacts
+8. execute all test cases
+9. map execution into a verdict
+10. persist the result behind the submission lease fence
 
-- process an already-created submission
-- validate jobs defensively
-- resolve the language spec
-- create the workspace
-- generate a C++ function harness when a job uses LeetCode-style function mode
-- submit compilation to the bounded dedicated compile-worker pool when the language requires compilation
-- acquire a sandbox
-- run all test cases
-- map execution results into judge verdicts
-- update submission lifecycle state in the store
+The service does not contain logic for Two Sum, LRU Cache, tree DP, graph traversal, or any other algorithmic problem.
 
-This is the main business-logic layer of the judge.
+### 3. Execution Modes
 
-#### 3. Executor
+Execution mode is a first-class contract independent of language backend:
 
-The executor is the infrastructure layer that knows how to interact with Docker.
+- **stdin/stdout mode** — execute user source with test-case input and compare output.
+- **Function Mode** — construct typed arguments, instantiate `Solution`, invoke one method, and serialize declared observations.
+- **Class Mode** — construct a user class and execute a metadata-defined sequence of operations.
+- **Interactive, SQL, and Shell modes** — reserved for future contracts and separate runtimes.
 
-Responsibilities:
+Function and Class Mode currently have a C++ backend. The shared mode, observation, validation, and comparison boundaries are designed so another backend does not require changes to queueing, workers, sandboxes, or verdict storage.
 
-- compile code inside the correct compile image
-- enforce Docker exit-code checks and retain capped stderr diagnostics for lifecycle failures
-- apply compile isolation: no network, bounded CPU/memory/PIDs, read-only root, tmpfs workspace, and unprivileged execution
-- start universal runtime sandboxes during server startup
-- readiness-check a sandbox after startup and restart before reuse
-- configure a borrowed sandbox with the submission memory limit
-- copy submission files into a borrowed sandbox
-- cancel and restart a sandbox after timeout/output-limit execution, without double-resetting it on release
-- replace a sandbox when reset or readiness fails
-- execute one test case command inside the sandbox
-- cap stdout and stderr at 64 KiB per stream
+## C++ Metadata-Driven Harness Runtime
 
-The executor should know how execution happens, but not what verdict should be returned.
+### Recursive type system
 
-#### 4. Sandbox Handle and Pool
+The C++ harness uses recursive type references rather than a registry entry for every container combination. Qualifiers and reference forms are normalized internally, so declarations such as these resolve through the same type system:
 
-The current code already introduces:
+```text
+vector<int>
+vector<vector<int>>
+const vector<int>&
+optional<vector<int>>
+vector<TreeNode*>
+```
 
-- a `Sandbox` handle abstraction
-- a `SandboxPool` abstraction
+Container support is implemented generically as `vector<T>`, allowing nested vectors and compositions with registered runtime types without adding a new generator for each combination.
 
-The runtime pool now uses one shared custom image: `yexjudge-runtime:latest`.
+### Supported value and runtime types
 
-Current behavior:
+The current C++ backend supports:
 
-- the server pre-creates a fixed number of universal sandboxes at startup
-- `Acquire` borrows an available sandbox
-- source files or compiled artifacts are copied into the borrowed sandbox
-- `Release` restarts the container to terminate remaining processes and clear temporary workspace state, then waits for readiness
-- if execution already restarted a sandbox, release returns it without a second reset
-- failed reset/readiness checks remove the old container and start a replacement
-- replacement provisioning retries until capacity is restored, without reducing the configured pool size silently
-- `Close` removes available, busy, and replacement sandboxes during graceful shutdown
-- all returned sandboxes are readiness-checked before reuse
+- `int`
+- `long long`
+- `double`
+- `bool`
+- `string`
+- recursive `optional<T>` values
+- recursive `vector<T>` values
+- `ListNode*`
+- `TreeNode*`
+- `RandomListNode*`
+- LeetCode-style random-pointer `Node*`
+- `GraphNode*`
 
-The custom runtime image is based on Debian slim and includes Python and a Java runtime. Compilers remain outside runtime sandboxes.
+The registered runtime adapters define construction, serialization, cleanup, and any type-specific observation behavior. Adding a new hidden runtime type is an adapter-registration task; the core harness generator does not need problem-specific changes.
 
-#### 5. Submission Store and Queue
+### Function Mode lifecycle
 
-The current async path can be backed by Postgres.
+A function-mode harness is generated in separate stages:
 
-Current behavior:
+1. emit headers and helper declarations
+2. emit type constructors and serializers
+3. include the user’s `class Solution` source
+4. construct parameters from testcase metadata
+5. invoke the declared member function
+6. observe the return value and declared parameter mutations
+7. enforce generic postconditions
+8. emit canonical output for the existing verdict pipeline
 
-- submissions are stored in the `submissions` table
+The lifecycle supports:
+
+- scalar and recursive vector returns
+- reference and const-reference parameters
+- in-place mutation observations
+- `void` functions whose result is represented by mutated parameters
+- prefix views driven by an integer return value
+- linked-list, tree, random-pointer, and graph construction
+- generic identity policies such as `disjoint` and `same_as`
+
+Identity-sensitive checks compare object relationships inside the generated program. Raw memory addresses are never exposed in API results. This supports deep-copy contracts such as Copy List with Random Pointer without adding a generator for that individual problem.
+
+### Class Mode lifecycle
+
+Class Mode accepts metadata for:
+
+- class name
+- constructor parameter types
+- operation names
+- operation parameter types
+- operation return types
+- operation arguments and expected observations
+
+The generated driver constructs the class once and executes the operation sequence. This already supports the execution shape used by Min Stack, LRU Cache, Trie, Browser History, and similar stateful designs without naming or hardcoding those problems.
+
+## Queue, Recovery, and Persistence
+
+PostgreSQL is both the durable submission store and the queue:
+
 - job payloads and results are stored as JSONB
-- workers claim queued submissions with `FOR UPDATE SKIP LOCKED`
-- claiming changes a submission from `queued` to `running`, increments `attempt_count`, and sets `started_at` and `lease_expires_at`
-- workers renew the lease while processing; renewals and final updates are fenced by `attempt_count`
-- expired leases are requeued up to the configured retry limit, then become `failed` with an `infrastructure_error` result
-- completed judge verdicts are updated to `finished` with a result payload
+- workers claim queued rows using `FOR UPDATE SKIP LOCKED`
+- claiming changes `queued` to `running`, increments `attempt_count`, and sets a lease
+- workers renew leases while processing
+- final updates are fenced by attempt number and active lease
+- expired attempts are requeued up to `QUEUE_MAX_ATTEMPTS`
+- exhausted attempts become failed infrastructure results
+- completed judge verdicts remain `finished`
 
-`DATABASE_URL` is required so the server always uses the durable path.
+The schema baseline and numbered migrations are embedded into the server and applied automatically during startup. Migration application uses an advisory lock so concurrent server starts do not apply the same migration simultaneously.
 
-#### 6. Language Registry
+## Compilation and Runtime Isolation
 
-Languages are not hardcoded in the service anymore.
+### Dedicated compile workers
 
-Each language spec defines:
+Compilation is scheduled through a bounded `CompileWorkerPool`, controlled by `COMPILE_SLOTS`. Compile workers are separate from submission workers and runtime sandboxes.
 
-- source file name
-- whether compilation is required
-- compile image
-- compile command
-- runtime command
+Every compile request still receives:
 
-The registry maps a requested language string to the correct language spec. Runtime image choice is intentionally global because every reusable sandbox supports all configured languages.
+- a fresh private workspace
+- a fresh disposable Docker compile container
+- no network access
+- bounded CPU, memory, and process count
+- a read-only container root filesystem
+- a writable restricted temporary filesystem
+- dropped capabilities and `no-new-privileges`
+- an unprivileged compiler user
+- bounded compiler stdout and stderr
 
-#### 7. Operational Metrics and Diagnostics
+The worker pool provides independent capacity, cancellation while queued or active, and clean shutdown without reusing compiler state between submissions.
 
-The process maintains bounded in-memory histograms for queue wait, compile, sandbox acquisition, staging, testcase/runtime execution, and sandbox reset durations. Worker busy count, worker capacity, compile-worker capacity, and runtime-pool availability are tracked. `GET /diagnostics` combines those metrics with aggregate Postgres queued/running/failed counts; structured JSON logs carry per-submission identity, worker, attempt, and timing fields.
+A ten-iteration host benchmark measured approximately `2058.96 ms` warm average before the worker-pool change and `2050.74 ms` afterward. The negligible difference shows that compiler execution, rather than container cold start, dominates this workload; reusable compile containers were therefore not introduced.
 
-#### 8. Fixed Capacity Controls
+### Reusable runtime sandbox pool
 
-Worker count, runtime sandbox count, and compile-worker count are separate bounded resources. Compiled submissions are dispatched to a dedicated compile worker before creating a fresh restricted compiler container; interpreted submissions can continue using worker capacity without waiting for compiler workers. Configuration validation rejects values outside the supported ranges and rejects worst-case runtime/compile memory reservations above the configured 8 GiB budget. Adaptive scaling remains deferred.
+The server pre-creates a fixed pool of universal `yexjudge-runtime:latest` containers. Each submission:
 
-### Current Supported Languages
+- borrows one sandbox
+- configures its memory limit
+- stages source or compiled artifacts using tar-based transfer
+- runs all test cases in that sandbox
+- restarts the sandbox on release to terminate processes and clear temporary state
+- readiness-checks it before reuse
 
-The codebase is structured to support multiple languages through specs. The current stdin/stdout runtime set includes:
+Timeouts and output-limit breaches cancel execution and restart the sandbox immediately. Failed reset or readiness checks remove the unhealthy container and provision a replacement without silently reducing configured capacity. Graceful shutdown removes pool-owned containers.
+
+One sandbox is used for all test cases of one submission, while different submissions remain isolated by reset boundaries and sandbox ownership.
+
+## Resource Limits and Reliability
+
+The system applies explicit limits to untrusted execution:
+
+- request body: `1 MiB`
+- compiler/runtime output: `64 KiB` per stdout/stderr stream
+- test-case time limit: bounded by validated job limits
+- runtime sandbox memory: bounded by validated configuration
+- compiler CPU, memory, PID, filesystem, and network restrictions
+- separate compile-worker, submission-worker, and runtime-sandbox capacities
+- an `8 GiB` worst-case runtime/compile reservation budget for configuration validation
+
+Verdicts distinguish accepted, wrong answer, time limit exceeded, runtime error, memory limit exceeded, compilation error, output limit exceeded, validation error, and infrastructure error. Failed test cases include actual output when available.
+
+Submission leases and retry fencing prevent a stale worker from overwriting a result after another worker has recovered the submission.
+
+## Observability
+
+The server emits structured JSON logs containing submission identity, language, worker, attempt, status transitions, infrastructure failures, and execution-stage timings.
+
+The in-memory metrics snapshot tracks:
+
+- queue wait
+- compile duration
+- sandbox acquisition
+- staging
+- testcase/runtime execution
+- sandbox reset
+- queued, running, and failed submission counts
+- worker busy/total capacity
+- compile-worker capacity
+- sandbox available, busy, and starting state
+
+`GET /diagnostics` exposes aggregate operational state without returning source code or submission results.
+
+## Configuration and Deployment
+
+For local development:
+
+```bash
+cp .env.example .env
+go run ./cmd/server
+```
+
+Explicit process environment variables override `.env`. The real `.env` file is ignored by Git; only `.env.example` is committed.
+
+The server validates worker, sandbox, compile-worker, queue, timeout, and memory-budget configuration during startup.
+
+A local all-in-one deployment is available through Docker Compose:
+
+```bash
+docker build -t yexjudge-runtime:latest -f docker/runtime/Dockerfile .
+mkdir -p .yexjudge-workspaces
+docker compose up --build
+```
+
+The Compose application mounts the Docker socket because YexJudge launches sibling compile and runtime containers. This is suitable for trusted local development, not an untrusted multi-tenant deployment. The project directory is mounted at the same absolute path so host Docker can resolve workspace bind mounts. Compose publishes its PostgreSQL service on host port `5433` by default while the application connects internally to `postgres:5432`.
+
+Readiness checks distinguish a live process from a service that can safely accept work:
+
+```bash
+curl -i http://localhost:8080/health
+curl -i http://localhost:8080/ready
+```
+
+## Supported Languages and Scope
+
+Conventional stdin/stdout execution is available for:
 
 - C++
 - C
 - Python
-- Go (legacy path; no new backend work planned while removal is evaluated)
+- Go
 - Java
 
-C++ is the only active target for LeetCode-style Function Mode and future Class Mode work. Python and Java are deferred until the C++ roadmap is complete.
+Metadata-driven C++ Function Mode and Class Mode are the active LeetCode-style implementations. Python and Java Function/Class backends are deliberately deferred. Go remains stdin/stdout-only while its long-term product status is evaluated.
 
-The shared `yexjudge-runtime:latest` image must be built locally before starting the server.
+## Validation and Test Coverage
 
-### Current Strengths
+The repository includes:
 
-- HTTP code is much cleaner than the original monolithic handler
-- submission processing is now asynchronous from the client's point of view
-- submission status can be fetched separately through `GET /submissions/{id}`
-- execution logic is no longer mixed with transport logic
-- multi-language support now has a proper abstraction
-- one borrowed sandbox is used for all test cases of a submission
-- runtime sandbox creation is no longer required for each submission
-- multiple in-process workers consume submissions concurrently
+- validation and verdict unit tests
+- recursive C++ harness tests
+- custom runtime and identity-policy tests
+- Class Mode tests for state transitions, invalid calls, and an LRU Cache eviction contract
+- compile-worker cancellation, concurrency, and shutdown tests
+- sandbox reset, replacement, readiness, and output-limit tests
+- Postgres store, claim uniqueness, lease recovery, and stale-attempt tests
+- API/Docker integration tests covering readiness, async polling, all current stdin languages, C++ Function/Class Mode, timeouts, and compilation errors
+- an opt-in Docker compile benchmark
+- `scripts/load-test.sh` for repeatable asynchronous admission measurements
 
-### Current Limitations
+The standard local checks are:
 
-- a fresh compile container is still created per compiled submission
-- retries are bounded by `QUEUE_MAX_ATTEMPTS` and use the queue lease metadata
-- Postgres schema changes are applied through `db/submissions.sql` and numbered migration files
-
-## Target Architecture
-
-The long-term direction is an asynchronous online judge with dedicated workers, bounded disposable compile infrastructure, and reusable runtime sandboxes.
-
-```mermaid
-flowchart LR
-    Client[Client] --> Gateway[API Gateway]
-    Gateway --> Validate[Validation and Admission Control]
-    Validate --> Queue[Job Queue]
-    Queue --> Worker1[Judge Worker 1]
-    Queue --> Worker2[Judge Worker 2]
-    Queue --> WorkerN[Judge Worker N]
-    Worker1 --> CompilePool[Bounded Compile Worker Pool]
-    Worker2 --> CompilePool
-    WorkerN --> CompilePool
-    Worker1 --> SandboxPool[Universal Reusable Sandbox Pool]
-    Worker2 --> SandboxPool
-    WorkerN --> SandboxPool
-    Worker1 --> Results[Result Store]
-    Worker2 --> Results
-    WorkerN --> Results
+```bash
+go test ./...
+go test -race ./...
+go vet ./...
 ```
 
-## Target Principles
+Postgres-backed integration tests use `YEXJUDGE_TEST_DATABASE_URL`. Docker/API integration tests also require the runtime and compiler images. The current project has been verified with PostgreSQL, Docker Compose, readiness checks, and a clean post-test container state.
 
-### 1. Thin API Gateway
+## Scope Boundaries
 
-The gateway should only:
+The completed architecture intentionally does not include:
 
-- validate payloads
-- reject bad or wasteful submissions
-- authenticate and rate-limit in future
-- enqueue accepted jobs
-- expose status and result endpoints
+- algorithm-specific judge logic
+- problem-specific harnesses
+- Python or Java Function/Class generation
+- Go Function/Class generation
+- adaptive capacity
+- interactive, SQL, or Shell runtimes
+- authentication or per-user rate limiting, because there is no user/account model yet
 
-The gateway should not compile or run code directly.
-
-### 2. Queue-Backed Async Execution
-
-Submission execution should move fully out of the HTTP request path.
-
-Target flow:
-
-1. client submits code
-2. gateway validates request
-3. gateway enqueues job
-4. worker picks up job
-5. worker compiles code
-6. worker borrows sandbox
-7. worker runs all test cases
-8. worker stores verdict
-9. client polls for result
-
-Benefits:
-
-- low-latency API responses
-- cleaner fault isolation
-- better throughput under burst load
-- easier retries and recovery
-
-### 3. Bounded Compile Infrastructure
-
-Compilation should have dedicated capacity separate from submission orchestration and runtime execution.
-
-The current target model is:
-
-- a bounded compile worker pool
-- a fresh restricted compile container and private workspace for every submission
-- explicit cancellation and graceful shutdown for queued and active compile jobs
-
-This keeps compiler concurrency predictable without allowing compiler state or artifacts to cross submission boundaries. Compile and runtime should remain separate concerns, and the exact same container must not be used for both compile and execution.
-
-### 4. Universal Reusable Runtime Sandbox Pool
-
-Runtime isolation uses a pool of pre-created containers built from one shared runtime-only image.
-
-Each worker should:
-
-- acquire one sandbox for the submission
-- run all test cases in that sandbox
-- reset sandbox state after execution
-- release it back to the pool
-
-This is the main path to avoiding repeated runtime container creation per submission while still keeping isolation.
-
-### 5. One Sandbox Per Submission
-
-The execution model should remain:
-
-- one sandbox per submission
-- many test cases inside that same sandbox
-
-This keeps execution efficient while preserving clear reset boundaries.
-
-## Recommended End-State
-
-The best balance of speed and security for YexJudge is:
-
-- async API
-- queue-backed workers
-- separate compile and runtime phases
-- bounded dedicated compile-worker pool with disposable compile environments
-- universal reusable runtime sandbox pool
-- one sandbox per submission
-
-This avoids:
-
-- direct execution in the request path
-- container startup per test case
-- mixing compile tooling into runtime sandboxes unnecessarily
-
-## Next Work Order
-
-The actionable implementation order is maintained in [`plan.md`](plan.md). This architecture document describes system boundaries and target principles; `plan.md` owns sequencing, runtime verification, hardening, recovery, testing, observability, capacity, and compile-performance work.
-
-Keep the documents aligned when the target architecture or public behavior changes.
-
-## Design Notes
-
-### Validation Strategy
-
-Validation should exist in two places:
-
-- HTTP layer for immediate `400 Bad Request` responses
-- service layer as defensive validation
-
-This keeps the system safe even after multiple entrypoints or worker paths are introduced.
-Current admission and execution caps include a 1 MiB JSON request body, 64 KiB stdout/stderr per stream, at most 10000ms per test case, and 512MB of sandbox memory. Compile containers and runtime sandboxes are network-disabled and resource-limited. All execution goes through the durable submission queue; `POST /submit` is the bounded synchronous convenience wrapper.
-
-### Language Strategy
-
-Each language should describe its own:
-
-- compile image
-- compile command
-- runtime command
-
-All languages execute in the configured universal runtime image. This avoids maintaining separate runtime pools while keeping compiler toolchains out of the execution sandbox.
-
-C++ also supports a LeetCode-style function mode. In that mode, the request includes function metadata such as function name, return type, and parameter types. The judge generates a hidden C++ driver that constructs each test case, calls `Solution.<functionName>`, serializes the return value, and then uses the normal verdict comparison path.
-The current implementation supports that path for C++ only. It is intentionally the first step toward broader driver-based problem formats, but no other language backend will be added until the C++ custom-type and Class Mode roadmap is complete. Python and Java remain future work; Go is not a planned driver backend and may be removed after a separate compatibility decision.
-
-### Pool Strategy
-
-The current `ExecutorSandboxPool` borrows warm universal sandboxes and returns them after a restart plus bounded readiness check. Timeout/output-limit execution restarts the sandbox immediately and marks it so release does not double-reset it. Failed reset/readiness checks remove the old container and replace it; graceful server shutdown removes the startup-created pool containers.
-
-Future hardening should add production health/readiness checks and deployment packaging; fixed pool-capacity recovery and durable queue coordination are already implemented.
-
-## Summary
-
-YexJudge is currently an asynchronous single-process judge with a much cleaner internal architecture than before: thin server layer, submission queueing, background worker processing, explicit service orchestration, executor abstraction, sandbox handle and pool abstraction, and language-based execution pipelines.
-
-The long-term target remains an asynchronous, queue-backed, worker-driven judge with bounded dedicated compile workers and reusable runtime sandbox pools. Compile environments remain disposable per submission to preserve isolation; the current refactor is intentionally aimed at improving scheduling and lifecycle behavior without weakening that boundary.
+These are future extensions, not prerequisites for the completed C++-first service.

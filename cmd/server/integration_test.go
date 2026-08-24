@@ -127,6 +127,24 @@ func TestAPIIntegration(t *testing.T) {
 	client := &http.Client{Timeout: 5 * time.Second}
 	waitForHealth(t, client, baseURL+"/health", &serverLog)
 
+	t.Run("readiness", func(t *testing.T) {
+		response, err := client.Get(baseURL + "/ready")
+		if err != nil {
+			t.Fatalf("GET /ready failed: %v", err)
+		}
+		defer response.Body.Close()
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("GET /ready returned %d; log:\n%s", response.StatusCode, serverLog.String())
+		}
+		var readiness ReadinessResponse
+		if err := json.NewDecoder(response.Body).Decode(&readiness); err != nil {
+			t.Fatalf("decode readiness response: %v", err)
+		}
+		if readiness.Status != "ready" || readiness.Checks["postgres"] != "ready" || readiness.Checks["runtime"] != "ready" {
+			t.Fatalf("readiness response = %+v, want all dependencies ready", readiness)
+		}
+	})
+
 	t.Run("diagnostics", func(t *testing.T) {
 		response, err := client.Get(baseURL + "/diagnostics")
 		if err != nil {
@@ -279,6 +297,89 @@ func TestAPIIntegration(t *testing.T) {
 		decodeJSON(t, response, &result)
 		if result.Status != judge.SubmissionFinished || result.Result == nil || result.Result.Status != judge.Accepted {
 			t.Fatalf("class-mode response = status=%s result=%+v, want finished accepted; log:\n%s", result.Status, result.Result, serverLog.String())
+		}
+		submissionIDs = append(submissionIDs, result.ID)
+	})
+
+	t.Run("C++ LRU Cache class mode", func(t *testing.T) {
+		response := postAndDecode(t, client, baseURL+"/submit", map[string]any{
+			"language": "cpp",
+			"mode":     "class",
+			"sourceCode": `class LRUCache {
+	int capacity;
+	list<pair<int, int>> items;
+	unordered_map<int, list<pair<int, int>>::iterator> index;
+public:
+	LRUCache(int capacity) : capacity(capacity) {}
+	int get(int key) {
+		auto found = index.find(key);
+		if (found == index.end()) return -1;
+		items.splice(items.begin(), items, found->second);
+		return found->second->second;
+	}
+	void put(int key, int value) {
+		if (capacity <= 0) return;
+		auto found = index.find(key);
+		if (found != index.end()) {
+			found->second->second = value;
+			items.splice(items.begin(), items, found->second);
+			return;
+		}
+		items.emplace_front(key, value);
+		index[key] = items.begin();
+		if (static_cast<int>(index.size()) > capacity) {
+			auto leastRecent = prev(items.end());
+			index.erase(leastRecent->first);
+			items.pop_back();
+		}
+	}
+};`,
+			"class": map[string]any{
+				"name": "LRUCache",
+				"constructor": map[string]any{
+					"params": []map[string]any{{"name": "capacity", "type": "int"}},
+				},
+				"operations": []map[string]any{
+					{"name": "get", "returnType": "int", "params": []map[string]any{{"name": "key", "type": "int"}}},
+					{"name": "put", "returnType": "void", "params": []map[string]any{{"name": "key", "type": "int"}, {"name": "value", "type": "int"}}},
+				},
+			},
+			"testCases": []map[string]any{
+				{
+					"id":              1,
+					"constructorArgs": []any{2},
+					"operations": []map[string]any{
+						{"name": "put", "args": []any{1, 1}},
+						{"name": "put", "args": []any{2, 2}},
+						{"name": "get", "args": []any{1}},
+						{"name": "put", "args": []any{3, 3}},
+						{"name": "get", "args": []any{2}},
+						{"name": "put", "args": []any{4, 4}},
+						{"name": "get", "args": []any{1}},
+						{"name": "get", "args": []any{3}},
+						{"name": "get", "args": []any{4}},
+					},
+					"expected": []any{nil, nil, 1, nil, -1, nil, -1, 3, 4},
+				},
+				{
+					"id":              2,
+					"constructorArgs": []any{1},
+					"operations": []map[string]any{
+						{"name": "put", "args": []any{10, 10}},
+						{"name": "get", "args": []any{10}},
+						{"name": "put", "args": []any{20, 20}},
+						{"name": "get", "args": []any{10}},
+						{"name": "get", "args": []any{20}},
+					},
+					"expected": []any{nil, 10, nil, -1, 20},
+				},
+			},
+			"limits": map[string]any{"timeLimitMs": 1000, "memoryLimitMb": 128},
+		})
+		var result judge.SubmissionResponse
+		decodeJSON(t, response, &result)
+		if result.Status != judge.SubmissionFinished || result.Result == nil || result.Result.Status != judge.Accepted {
+			t.Fatalf("LRU class-mode response = status=%s result=%+v, want finished accepted; log:\n%s", result.Status, result.Result, serverLog.String())
 		}
 		submissionIDs = append(submissionIDs, result.ID)
 	})

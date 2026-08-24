@@ -73,6 +73,67 @@ public:
 	}
 }
 
+func TestGeneratedClassHarnessSupportsZeroArgumentConstructor(t *testing.T) {
+	gxx, err := exec.LookPath("g++")
+	if err != nil {
+		t.Skip("g++ is not installed")
+	}
+
+	source, err := NewClassGenerator(nil).Generate(ClassRequest{
+		SourceCode: `class MinStack {
+		vector<int> values;
+	public:
+		MinStack() = default;
+		void push(int value) { values.push_back(value); }
+		void pop() { values.pop_back(); }
+		int top() { return values.back(); }
+	};`,
+		Class: harness.ClassSpec{
+			Name: "MinStack",
+			Operations: []harness.OperationSpec{
+				{Name: "push", ReturnType: "void", Params: []harness.Parameter{{Name: "value", Type: "int"}}},
+				{Name: "pop", ReturnType: "void"},
+				{Name: "top", ReturnType: "int"},
+			},
+		},
+		TestCases: []harness.TestCase{{
+			ID: 1,
+			Operations: []harness.OperationCall{
+				{Name: "push", Args: []json.RawMessage{json.RawMessage(`7`)}},
+				{Name: "push", Args: []json.RawMessage{json.RawMessage(`3`)}},
+				{Name: "top"},
+				{Name: "pop"},
+				{Name: "top"},
+			},
+			Expected: json.RawMessage(`[null,null,3,null,7]`),
+		}},
+	})
+	if err != nil {
+		t.Fatalf("Generate() error = %v", err)
+	}
+
+	directory := t.TempDir()
+	sourcePath := filepath.Join(directory, "main.cpp")
+	binaryPath := filepath.Join(directory, "main")
+	if err := os.WriteFile(sourcePath, []byte(source), 0600); err != nil {
+		t.Fatal(err)
+	}
+	compile := exec.Command(gxx, "-std=c++17", sourcePath, "-o", binaryPath)
+	if output, err := compile.CombinedOutput(); err != nil {
+		t.Fatalf("generated zero-argument class source did not compile: %v\n%s", err, output)
+	}
+
+	run := exec.Command(binaryPath)
+	run.Stdin = strings.NewReader("1\n")
+	output, err := run.CombinedOutput()
+	if err != nil {
+		t.Fatalf("generated zero-argument class harness failed: %v\n%s", err, output)
+	}
+	if got, want := string(output), `[null,null,3,null,7]`; got != want {
+		t.Fatalf("zero-argument class output = %q, want %q", got, want)
+	}
+}
+
 func TestClassGeneratorRejectsUnknownOperationCalls(t *testing.T) {
 	_, err := NewClassGenerator(nil).Generate(ClassRequest{
 		SourceCode: "class Counter {};",

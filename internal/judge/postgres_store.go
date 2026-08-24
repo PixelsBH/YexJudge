@@ -1,6 +1,7 @@
 package judge
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -55,6 +56,10 @@ func (s *PostgresSubmissionStore) Save(sub Submission) error {
 		sub.FailureMessage,
 	)
 	return err
+}
+
+func (s *PostgresSubmissionStore) Ready(ctx context.Context) error {
+	return s.db.PingContext(ctx)
 }
 
 func (s *PostgresSubmissionStore) Get(id string) (Submission, bool) {

@@ -16,7 +16,7 @@ Compatibility route:
 
 - `POST /judge` is still available as an alias.
 
-The server uses Postgres for durable submission storage and queue claiming. `DATABASE_URL` is required at startup.
+The server uses Postgres for durable submission storage and queue claiming. The optional project-root `.env` file is loaded at startup for local development; explicitly exported environment variables take precedence. `DATABASE_URL` is required after configuration is loaded.
 
 ## Requirements
 
@@ -79,7 +79,7 @@ Create the submissions table:
 psql -U postgres -d yexjudge -f db/submissions.sql
 ```
 
-The schema stores the original job payload, current status, final result, and timestamps. The same table is also used as the queue: workers claim queued submissions with `FOR UPDATE SKIP LOCKED`.
+The schema stores the original job payload, current status, final result, and timestamps. The same table is also used as the queue: workers claim queued submissions with `FOR UPDATE SKIP LOCKED`. The server applies `db/submissions.sql` and numbered files under `db/migrations/` automatically during startup, so manual `psql -f` commands are optional when starting a new local instance.
 
 If you prefer running Postgres through Docker:
 
@@ -105,13 +105,19 @@ psql 'postgres://postgres@localhost:5432/yexjudge?sslmode=disable' -f db/migrati
 
 ## Run the Server
 
-From the project root, using Postgres:
+From the project root, create a local environment file from the safe template:
 
 ```bash
-DATABASE_URL='postgres://postgres@localhost:5432/yexjudge?sslmode=disable' go run ./cmd/server
+cp .env.example .env
 ```
 
-If your Postgres user uses a password, include it in the URL:
+Edit `.env` if your Postgres credentials or local capacity differ, then start the server without repeating the database URL:
+
+```bash
+go run ./cmd/server
+```
+
+The `.env` file is ignored by Git. Do not commit passwords or other secrets. Explicit environment variables still override `.env`, so a one-off override remains possible:
 
 ```bash
 DATABASE_URL='postgres://postgres:postgres@localhost:5432/yexjudge?sslmode=disable' go run ./cmd/server
@@ -136,9 +142,9 @@ Capacity controls and graceful shutdown:
 
 - `WORKER_COUNT` bounds concurrent queue orchestration (default `4`, allowed `1-64`).
 - `SANDBOX_POOL_SIZE` bounds concurrent runtime execution (default `4`, allowed `1-64`).
-- `COMPILE_SLOTS` independently bounds concurrent Docker compiler containers (default `2`, allowed `1-16`). Interpreted submissions do not consume compile slots.
+- `COMPILE_SLOTS` controls the dedicated compile-worker pool and independently bounds concurrent disposable Docker compiler containers (default `2`, allowed `1-16`). Interpreted submissions do not consume compile workers.
 - Startup rejects values outside those ranges or capacity combinations reserving more than 8 GiB at the configured worst-case limits. The default reservation is 3 GiB (`4 x 512 MiB` runtime sandboxes plus `2 x 512 MiB` compile slots).
-- During graceful shutdown, the server stops accepting requests, waits for workers within the shutdown deadline, and removes all warm and replacement sandbox containers.
+- During graceful shutdown, the server marks readiness as unavailable, stops accepting requests, cancels queued/active work within the shutdown deadline, waits for compile and submission workers, and removes all warm and replacement sandbox containers.
 
 Execution limits and API behavior:
 
@@ -165,13 +171,21 @@ using Postgres store and queue
 
 At startup, the server creates reusable Docker runtime sandboxes. If startup fails, check that `yexjudge-runtime:latest` exists and Docker is running.
 
-## Health Check
+## Health and Readiness Checks
 
-In another terminal:
+`/health` is a liveness check and only confirms that the process is running:
 
 ```bash
 curl http://localhost:8080/health
 ```
+
+`/ready` is a readiness check. It verifies that Postgres is reachable, the runtime sandbox pool has initialized capacity, and the server is not shutting down:
+
+```bash
+curl -i http://localhost:8080/ready
+```
+
+It returns `200` with `{"status":"ready"}` when the service can accept work and `503` with dependency details when it cannot.
 
 ## Diagnostics
 
@@ -181,7 +195,7 @@ For local operational visibility:
 curl http://localhost:8080/diagnostics
 ```
 
-The response includes queued/running/failed submission counts, worker busy/total capacity, compile-slot capacity, available/busy/starting runtime sandboxes, and cumulative latency histograms for queue wait, compilation, sandbox acquisition, staging, testcase/runtime execution, and sandbox reset. Logs are JSON structured events containing submission ID, language, worker ID, attempt, status transitions, and execution-stage durations.
+The response includes queued/running/failed submission counts, worker busy/total capacity, compile-worker capacity, available/busy/starting runtime sandboxes, and cumulative latency histograms for queue wait, compilation, sandbox acquisition, staging, testcase/runtime execution, and sandbox reset. Logs are JSON structured events containing submission ID, language, worker ID, attempt, status transitions, and execution-stage durations.
 
 The endpoint exposes aggregate state only; it does not return source code or submission results. Authentication for deployments with users remains future work.
 
@@ -300,7 +314,7 @@ For identity-sensitive functions, metadata can declare generic `disjoint` or `sa
 
 C++ Class Mode supports a generic constructor followed by a sequence of declared operations. It does not contain drivers for individual design problems.
 
-A testcase uses `constructorArgs`, `operations`, and one expected result per operation:
+A testcase uses `constructorArgs`, `operations`, and one expected result per operation. This same metadata contract supports stateful designs such as Min Stack, Trie, HashMap, and LRU Cache. LRU Cache appears in the test suite only as a representative multi-case regression fixture; there is no LRU-specific production implementation.
 
 ```json
 {
@@ -326,6 +340,71 @@ A testcase uses `constructorArgs`, `operations`, and one expected result per ope
   ]
 }
 ```
+
+### Complete LRU Cache submission example
+
+The following submits a complete LRU Cache implementation through the generic Class Mode API. Start YexJudge first with `go run ./cmd/server` or Docker Compose, then run this command from any Bash shell:
+
+```bash
+curl -sS -X POST http://localhost:8080/submit \
+  -H 'Content-Type: application/json' \
+  --data-binary @- <<'JSON'
+{
+  "language": "cpp",
+  "mode": "class",
+  "sourceCode": "class LRUCache {\n    int capacity;\n    list<pair<int, int>> items;\n    unordered_map<int, list<pair<int, int>>::iterator> index;\npublic:\n    LRUCache(int capacity) : capacity(capacity) {}\n\n    int get(int key) {\n        auto found = index.find(key);\n        if (found == index.end()) return -1;\n        items.splice(items.begin(), items, found->second);\n        return found->second->second;\n    }\n\n    void put(int key, int value) {\n        if (capacity <= 0) return;\n        auto found = index.find(key);\n        if (found != index.end()) {\n            found->second->second = value;\n            items.splice(items.begin(), items, found->second);\n            return;\n        }\n        items.emplace_front(key, value);\n        index[key] = items.begin();\n        if (static_cast<int>(index.size()) > capacity) {\n            auto leastRecent = prev(items.end());\n            index.erase(leastRecent->first);\n            items.pop_back();\n        }\n    }\n};",
+  "class": {
+    "name": "LRUCache",
+    "constructor": {
+      "params": [
+        { "name": "capacity", "type": "int" }
+      ]
+    },
+    "operations": [
+      {
+        "name": "put",
+        "returnType": "void",
+        "params": [
+          { "name": "key", "type": "int" },
+          { "name": "value", "type": "int" }
+        ]
+      },
+      {
+        "name": "get",
+        "returnType": "int",
+        "params": [
+          { "name": "key", "type": "int" }
+        ]
+      }
+    ]
+  },
+  "testCases": [
+    {
+      "id": 1,
+      "constructorArgs": [2],
+      "operations": [
+        { "name": "put", "args": [1, 1] },
+        { "name": "put", "args": [2, 2] },
+        { "name": "get", "args": [1] },
+        { "name": "put", "args": [3, 3] },
+        { "name": "get", "args": [2] },
+        { "name": "put", "args": [4, 4] },
+        { "name": "get", "args": [1] },
+        { "name": "get", "args": [3] },
+        { "name": "get", "args": [4] }
+      ],
+      "expected": [null, null, 1, null, -1, null, -1, 3, 4]
+    }
+  ],
+  "limits": {
+    "timeLimitMs": 1000,
+    "memoryLimitMb": 128
+  }
+}
+JSON
+```
+
+A successful response has a finished result with `"status": "accepted"`. If the bounded `/submit` wait expires first, it returns a submission ID instead; retrieve that submission using the endpoint described below.
 
 ## Fetch Result
 
@@ -444,6 +523,38 @@ curl -X POST http://localhost:8080/submissions \
   }'
 ```
 
+## Docker Compose Deployment
+
+For a local all-in-one deployment, run the commands from the project root. First build the runtime image and create the shared workspace directory:
+
+```bash
+docker build -t yexjudge-runtime:latest -f docker/runtime/Dockerfile .
+mkdir -p .yexjudge-workspaces
+docker compose up --build
+```
+
+Compose publishes its PostgreSQL service on host port `5433` by default so it does not conflict with a PostgreSQL server already using host port `5432`. Change `POSTGRES_HOST_PORT` if you need another host port, for example `POSTGRES_HOST_PORT=55432 docker compose up --build`. The YexJudge container still connects to PostgreSQL internally through `postgres:5432`.
+
+The Compose application container mounts the Docker socket because YexJudge launches isolated sibling compile/runtime containers. This setup is intended for trusted local development; do not expose the Docker socket to an untrusted multi-tenant service. The project directory is mounted at the same absolute path inside the application container so the host Docker daemon can resolve compile workspace bind mounts.
+
+Stop the deployment with:
+
+```bash
+docker compose down
+```
+
+Postgres data is kept in the `yexjudge-postgres-data` named volume unless removed explicitly.
+
+## Load Test
+
+With the server running, submit a small burst of asynchronous C++ jobs and measure API admission latency:
+
+```bash
+bash scripts/load-test.sh 10 4
+```
+
+Use `YEXJUDGE_BASE_URL` to target another server, for example `YEXJUDGE_BASE_URL=http://localhost:8080 bash scripts/load-test.sh 20 4`. The script requires Bash and `curl`; it reports accepted/failed requests and average admission time. It measures queue admission, not full completion latency.
+
 ## Development Checks
 
 Run the local Go checks:
@@ -486,8 +597,21 @@ If the server fails during startup:
 - make sure Docker is running
 - make sure `yexjudge-runtime:latest` was built
 - run `docker images | grep yexjudge-runtime`
-- if using Postgres, make sure `DATABASE_URL` is correct
-- if using Postgres, make sure `db/submissions.sql` has been applied
+- if using Postgres, make sure `DATABASE_URL` in `.env` is correct, or provide it explicitly in the environment
+- if using Postgres, check the startup migration error; the server applies `db/submissions.sql` and numbered migrations automatically
+
+If `docker compose` reports `unknown flag: --build` or is not recognized:
+
+- install the Docker Compose v2 plugin for your distribution
+- verify it with `docker compose version`
+- if the legacy command is installed instead, use `docker-compose up --build`
+- run the command from the project root, where `docker-compose.yml` is located
+
+For example, on Debian/Ubuntu:
+
+```bash
+sudo apt-get install docker-compose-plugin
+```
 
 If the first C, C++, Go, or Java submission is slow:
 
@@ -507,6 +631,6 @@ If execution fails with missing commands:
 - rebuild the runtime image
 - confirm the runtime image includes `python3` and Java runtime support
 
-## Next Major Work
+## Future Roadmap
 
-The implementation order is maintained in [`plan.md`](plan.md). After the test baseline is complete, the next major runtime work is hardening execution/admission control followed by recoverable queue leases and worker recovery.
+The C++-first production milestone is complete. Optional future work is maintained in [`plan.md`](plan.md): adaptive capacity, additional Python/Java Function/Class backends, and an explicit decision about retaining or removing Go. These extensions are not required to use or showcase the current service.

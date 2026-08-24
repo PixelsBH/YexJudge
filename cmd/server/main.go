@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	schema "yexjudge/db"
 	"yexjudge/internal/judge"
 	"yexjudge/internal/judge/languages"
 	"yexjudge/internal/observability"
@@ -252,6 +253,9 @@ func cleanupSandboxes(executor judge.Executor, sandboxes []*judge.Sandbox) {
 
 func main() {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
+	if err := loadEnvFile(".env"); err != nil {
+		log.Fatal("failed to load .env:", err)
+	}
 	cfg, err := loadConfig()
 	if err != nil {
 		log.Fatal("invalid configuration:", err)
@@ -311,6 +315,7 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", healthHandler)
+	mux.HandleFunc("/ready", readinessHandler)
 	mux.HandleFunc("/diagnostics", diagnosticsHandler)
 	mux.HandleFunc("/judge", createSubmissionHandler)
 	mux.HandleFunc("/submissions", submissionsCollectionHandler)
@@ -329,6 +334,7 @@ func main() {
 
 		<-sigCtx.Done()
 		log.Println("shutdown signal received")
+		serverDraining.Store(true)
 
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
@@ -376,28 +382,35 @@ func buildPersistence(cfg config) (judge.SubmissionStore, judge.SubmissionQueue,
 		return nil, nil, nil, fmt.Errorf("DATABASE_URL is required")
 	}
 
-	db, err := sql.Open("pgx", cfg.databaseURL)
+	sqlDB, err := sql.Open("pgx", cfg.databaseURL)
 	if err != nil {
 		return nil, nil, nil, err
 	}
 
-	if err := db.Ping(); err != nil {
-		db.Close()
+	if err := sqlDB.Ping(); err != nil {
+		sqlDB.Close()
 		return nil, nil, nil, err
 	}
+	migrationCtx, cancelMigration := context.WithTimeout(context.Background(), 10*time.Second)
+	if err := schema.Apply(migrationCtx, sqlDB); err != nil {
+		cancelMigration()
+		sqlDB.Close()
+		return nil, nil, nil, err
+	}
+	cancelMigration()
 
 	log.Println("using Postgres store and queue")
 
-	store := judge.NewPostgresSubmissionStore(db)
+	store := judge.NewPostgresSubmissionStore(sqlDB)
 	queue := judge.NewPostgresSubmissionQueueWithOptions(
-		db,
+		sqlDB,
 		cfg.queuePoll,
 		cfg.queueLease,
 		cfg.queueMaxAttempts,
 	)
 
 	cleanup := func() {
-		if err := db.Close(); err != nil {
+		if err := sqlDB.Close(); err != nil {
 			log.Println("failed to close database:", err)
 		}
 	}

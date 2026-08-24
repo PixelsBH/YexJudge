@@ -590,7 +590,7 @@ construct object
 → ...
 ```
 
-A generic contract might look like:
+A generic contract might look like this (LRU Cache is only an illustrative example, not a special case):
 
 ```json
 {
