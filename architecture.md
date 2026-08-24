@@ -51,8 +51,8 @@ flowchart TD
     Worker --> Service[Judge Service]
     Service --> Registry[Language Registry]
     Service --> Workspace[Create Workspace]
-    Service --> CompileSlots[Acquire compile slot]
-    CompileSlots --> Compile[Compile in restricted container]
+    Service --> CompileWorkers[Submit to bounded compile-worker pool]
+    CompileWorkers --> Compile[Dedicated worker uses fresh restricted container]
     Compile -->|User compiler exit| CE[Store compilation_error]
     Compile -->|Docker/timeout failure| IE[Store infrastructure_error]
     Compile -->|Success or skipped| Acquire[Acquire Universal Sandbox]
@@ -118,7 +118,7 @@ Responsibilities:
 - resolve the language spec
 - create the workspace
 - generate a C++ function harness when a job uses LeetCode-style function mode
-- acquire a bounded compile slot and compile if the language requires compilation
+- submit compilation to the bounded dedicated compile-worker pool when the language requires compilation
 - acquire a sandbox
 - run all test cases
 - map execution results into judge verdicts
@@ -201,11 +201,11 @@ The registry maps a requested language string to the correct language spec. Runt
 
 #### 7. Operational Metrics and Diagnostics
 
-The process maintains bounded in-memory histograms for queue wait, compile, sandbox acquisition, staging, testcase/runtime execution, and sandbox reset durations. Worker busy count, worker capacity, compile-slot capacity, and runtime-pool availability are tracked. `GET /diagnostics` combines those metrics with aggregate Postgres queued/running/failed counts; structured JSON logs carry per-submission identity, worker, attempt, and timing fields.
+The process maintains bounded in-memory histograms for queue wait, compile, sandbox acquisition, staging, testcase/runtime execution, and sandbox reset durations. Worker busy count, worker capacity, compile-worker capacity, and runtime-pool availability are tracked. `GET /diagnostics` combines those metrics with aggregate Postgres queued/running/failed counts; structured JSON logs carry per-submission identity, worker, attempt, and timing fields.
 
 #### 8. Fixed Capacity Controls
 
-Worker count, runtime sandbox count, and compile slots are separate bounded resources. Compiled submissions acquire a compile slot before creating their one-off compiler container; interpreted submissions can continue using worker capacity without waiting for compiler slots. Configuration validation rejects values outside the supported ranges and rejects worst-case runtime/compile memory reservations above the configured 8 GiB budget. Adaptive scaling remains deferred.
+Worker count, runtime sandbox count, and compile-worker count are separate bounded resources. Compiled submissions are dispatched to a dedicated compile worker before creating a fresh restricted compiler container; interpreted submissions can continue using worker capacity without waiting for compiler workers. Configuration validation rejects values outside the supported ranges and rejects worst-case runtime/compile memory reservations above the configured 8 GiB budget. Adaptive scaling remains deferred.
 
 ### Current Supported Languages
 
@@ -240,7 +240,7 @@ The shared `yexjudge-runtime:latest` image must be built locally before starting
 
 ## Target Architecture
 
-The long-term direction is an asynchronous online judge with dedicated workers, reusable compile infrastructure, and reusable runtime sandboxes.
+The long-term direction is an asynchronous online judge with dedicated workers, bounded disposable compile infrastructure, and reusable runtime sandboxes.
 
 ```mermaid
 flowchart LR
@@ -250,7 +250,7 @@ flowchart LR
     Queue --> Worker1[Judge Worker 1]
     Queue --> Worker2[Judge Worker 2]
     Queue --> WorkerN[Judge Worker N]
-    Worker1 --> CompilePool[Reusable Compile Environment]
+    Worker1 --> CompilePool[Bounded Compile Worker Pool]
     Worker2 --> CompilePool
     WorkerN --> CompilePool
     Worker1 --> SandboxPool[Universal Reusable Sandbox Pool]
@@ -298,18 +298,17 @@ Benefits:
 - better throughput under burst load
 - easier retries and recovery
 
-### 3. Reusable Compile Infrastructure
+### 3. Bounded Compile Infrastructure
 
-Compiled languages should not rely forever on one-off compile container startup.
+Compilation should have dedicated capacity separate from submission orchestration and runtime execution.
 
-The target model is:
+The current target model is:
 
-- a reusable compile environment
-- or a compile worker pool
+- a bounded compile worker pool
+- a fresh restricted compile container and private workspace for every submission
+- explicit cancellation and graceful shutdown for queued and active compile jobs
 
-This keeps toolchains available without rebuilding execution state for every submission.
-
-Compile and runtime should remain separate concerns. The recommended model is not to use the exact same container for both compile and execution.
+This keeps compiler concurrency predictable without allowing compiler state or artifacts to cross submission boundaries. Compile and runtime should remain separate concerns, and the exact same container must not be used for both compile and execution.
 
 ### 4. Universal Reusable Runtime Sandbox Pool
 
@@ -340,7 +339,7 @@ The best balance of speed and security for YexJudge is:
 - async API
 - queue-backed workers
 - separate compile and runtime phases
-- reusable compile environments
+- bounded dedicated compile-worker pool with disposable compile environments
 - universal reusable runtime sandbox pool
 - one sandbox per submission
 
@@ -391,4 +390,4 @@ Future hardening should add production health/readiness checks and deployment pa
 
 YexJudge is currently an asynchronous single-process judge with a much cleaner internal architecture than before: thin server layer, submission queueing, background worker processing, explicit service orchestration, executor abstraction, sandbox handle and pool abstraction, and language-based execution pipelines.
 
-The long-term target remains an asynchronous, queue-backed, worker-driven judge with reusable compile environments and reusable runtime sandbox pools. The current refactor is intentionally aimed at making that transition possible without rewriting the core judging logic again.
+The long-term target remains an asynchronous, queue-backed, worker-driven judge with bounded dedicated compile workers and reusable runtime sandbox pools. Compile environments remain disposable per submission to preserve isolation; the current refactor is intentionally aimed at improving scheduling and lifecycle behavior without weakening that boundary.

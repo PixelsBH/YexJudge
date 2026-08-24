@@ -198,6 +198,7 @@ func TestProcessSubmissionMapsCompilationError(t *testing.T) {
 	}}
 	registry := languages.NewRegistry(languages.Cpp{})
 	service := NewService(executor, testcasePool{}, store, registry)
+	defer service.Close()
 	submission := Submission{
 		ID:     "compile-error",
 		Status: SubmissionQueued,
@@ -229,6 +230,7 @@ func TestProcessSubmissionPersistsInfrastructureResult(t *testing.T) {
 	executor := &testcaseExecutor{prepareErr: errors.New("docker exec exited with code 126: permission denied")}
 	registry := languages.NewRegistry(languages.Python{})
 	service := NewService(executor, testcasePool{}, store, registry)
+	defer service.Close()
 	submission := Submission{
 		ID:     "infrastructure-error",
 		Status: SubmissionQueued,

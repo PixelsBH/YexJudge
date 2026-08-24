@@ -290,12 +290,14 @@ func main() {
 	submissionQueue = queue
 
 	judgeService = judge.NewServiceWithMetricsAndCompileSlots(executor, pool, store, registry, runtimeMetrics, cfg.compileSlots)
+	defer judgeService.Close()
 
 	workerCtx, cancelWorkers := context.WithCancel(context.Background())
 	defer cancelWorkers()
 	var workers sync.WaitGroup
 	if recovered, err := submissionQueue.RecoverExpired(context.Background()); err != nil {
 		cleanup()
+		judgeService.Close()
 		runtimePool.Close()
 		log.Fatal("failed to recover expired submissions:", err)
 	} else if recovered > 0 {
@@ -348,6 +350,7 @@ func main() {
 		case <-shutdownCtx.Done():
 			log.Println("worker shutdown deadline reached; removing runtime sandboxes")
 		}
+		judgeService.Close()
 		runtimePool.Close()
 
 		close(shutdownDone)

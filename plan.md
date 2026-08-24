@@ -29,7 +29,7 @@ Current architectural constraints:
 - jobs left in `running` after a crash are recovered through bounded queue leases and retries
 - opt-in Postgres store/queue integration tests exist behind `YEXJUDGE_TEST_DATABASE_URL`
 - opt-in API/Docker integration tests cover the server lifecycle and core routes
-- fixed worker, runtime-sandbox, and compile-slot capacity controls are validated at startup
+- fixed worker, runtime-sandbox, and compile-worker capacity controls are validated at startup
 - graceful shutdown waits for workers and removes all pool-owned runtime containers
 
 ## Current Delivery Target
@@ -353,21 +353,22 @@ Work:
 1. Separate the capacities conceptually.
    - worker count limits concurrent submission orchestration
    - sandbox pool size limits concurrent runtime execution
-   - compile slots independently limit one-off compiler containers because compile containers are not pooled yet
+   - compile worker capacity independently limits disposable compiler environments; these workers are separate from submission workers and runtime sandboxes
 
 2. Add configuration and validation.
-   - minimum and maximum values for workers, sandboxes, and compile slots
+   - minimum and maximum values for workers, sandboxes, and compile-worker slots
    - reject unsafe configurations that exceed the 8 GiB worst-case runtime/compile reservation budget
    - document recommended local defaults and expose configured capacity through `/diagnostics`
 
-3. Add a compile semaphore.
+3. Add bounded compile capacity.
    - prevent a burst of compiled submissions from launching unbounded Docker compile containers
    - preserve fair progress for interpreted languages where possible
+   - Phase 8 refines this initial bound into a dedicated compile-worker pool
 
 4. Harden the runtime pool lifecycle.
    - clean up warm sandbox containers during graceful shutdown
    - replace unhealthy sandboxes with retrying replacement provisioning without silently reducing capacity
-   - keep pool capacity, replacement startup, worker capacity, and compile slots observable
+   - keep pool capacity, replacement startup, worker capacity, and compile-worker capacity observable
 
 Definition of done:
 
@@ -377,10 +378,10 @@ Definition of done:
 
 Verification completed on 2026-08-23:
 
-- Worker, sandbox, and compile-slot configuration validation passed, including out-of-range and memory-budget rejection tests.
-- Compiled submissions acquire and release bounded compile slots; cancellation is propagated while waiting for a slot.
+- Worker, sandbox, and compile-worker configuration validation passed, including out-of-range and memory-budget rejection tests.
+- Compiled submissions are bounded by dedicated compile-worker capacity; cancellation is propagated while queued or actively compiling.
 - Runtime pool tests passed for replacement, no-double-reset, replacement startup tracking, and idempotent shutdown cleanup.
-- `GET /diagnostics` reports worker total/busy capacity, compile slots, and sandbox starting/available/busy state.
+- `GET /diagnostics` reports worker total/busy capacity, compile-worker slots, and sandbox starting/available/busy state.
 - `GOCACHE=/tmp/yexjudge-go-cache go test ./...` passed.
 - `GOCACHE=/tmp/yexjudge-go-cache go test -race ./...` passed.
 - `GOCACHE=/tmp/yexjudge-go-cache go vet ./...` passed.
@@ -402,7 +403,7 @@ Initial policy:
 2. Increase capacity only when queue depth and queue wait time stay above thresholds.
 3. Decrease capacity only after a sustained idle period.
 4. Never exceed a configured maximum determined from host CPU and memory.
-5. Treat compile slots separately from runtime sandboxes.
+5. Treat compile-worker capacity separately from runtime sandboxes.
 
 Signals to use:
 
@@ -418,25 +419,47 @@ Definition of done:
 - idle capacity returns toward the minimum without interrupting active jobs
 - memory pressure prevents scale-up and is recorded clearly
 
-## Phase 8: Reduce Compile Latency Carefully
+## Phase 8: Dedicated Compile Workers — complete
 
-Goal: remove the largest remaining per-submission overhead without weakening isolation.
+Status: **complete** for the bounded disposable compile-worker scope.
+
+Goal: separate compilation scheduling from submission workers while preserving strong per-submission isolation. The worker pool is primarily a capacity and lifecycle improvement; it must not claim a latency improvement unless a before/after benchmark demonstrates one.
+
+Benchmark completed on 2026-08-24:
+
+- `YEXJUDGE_RUN_COMPILE_BENCHMARK=1 YEXJUDGE_COMPILE_BENCHMARK_ITERATIONS=10 go test ./internal/judge -run '^TestCompileBaseline$' -count=1 -v` passed on the host.
+- Fresh restricted C++ compilation averaged `2058.96ms` after the first run, with a `2061.98ms` warm median and a `2116.33ms` first run.
+- The small first-versus-warm difference indicates that compiler execution dominates the measured time; reusable compile containers are not justified by this baseline.
 
 Work:
 
-1. Use the timings from Phase 5 to confirm compilation is the meaningful bottleneck.
-2. Keep compile and runtime environments separate.
-3. Choose one implementation:
-   - bounded reusable compile containers keyed by toolchain image, or
-   - dedicated compile workers with clean workspaces per job
-4. Ensure the compile environment is reset, output-bounded, network-disabled, and resource-limited after every job.
-5. Benchmark cold and warm compilation before and after the change.
+1. Keep compile and runtime environments separate.
+2. Route compile requests through a bounded dedicated worker pool.
+   - worker capacity is controlled by `COMPILE_SLOTS`
+   - compile requests are cancellable while queued and while active
+   - pool shutdown cancels active jobs and waits for workers to exit
+3. Preserve a fresh restricted compile environment for every job.
+   - no network
+   - bounded memory, CPU, PIDs, and compiler diagnostics
+   - private workspace and disposable container cleanup
+4. Benchmark before and after the worker-pool change for total compile time and concurrency behavior.
+5. Consider compiler-level optimizations separately only if future measurements show they are necessary.
 
 Definition of done:
 
-- compiled-language latency improves measurably under repeat load
+- compilation is scheduled by dedicated bounded workers independently of submission workers
+- cancellation and graceful shutdown do not strand queued or active compile requests
 - no compiler artifacts or processes survive between jobs
 - compilation isolation remains at least as strong as the current one-off container path
+- before/after measurements are recorded without claiming an unsupported latency gain
+
+Host verification completed on 2026-08-24:
+
+- `YEXJUDGE_RUN_COMPILE_BENCHMARK=1 YEXJUDGE_COMPILE_BENCHMARK_ITERATIONS=10 go test ./internal/judge -run '^TestCompileWorkerPoolBenchmark$' -count=1 -v` passed in 20.52s.
+- The worker-pool benchmark reported a `2050.74ms` warm average and `2052.01ms` warm median, compared with the pre-change `2058.96ms` warm average and `2061.98ms` warm median. This is effectively unchanged single-compile latency, with no unsupported performance claim.
+- `YEXJUDGE_TEST_DATABASE_URL='postgres://postgres@localhost:5432/yexjudge?sslmode=disable' go test ./internal/judge -count=1 -v` passed in 2.20s, including compile-worker, store, queue, recovery, fencing, validation, and verdict tests.
+- `YEXJUDGE_TEST_DATABASE_URL='postgres://postgres@localhost:5432/yexjudge?sslmode=disable' go test ./cmd/server -run APIIntegration -count=1 -v` passed in 41.81s, including all current language smoke tests, C++ Function/Class Mode, startup recovery, timeout, diagnostics, and compilation-error handling.
+- After the acceptance run, `docker ps -a --filter "name=yexjudge-"` returned no containers, confirming disposable runtime and compile containers were cleaned up.
 
 ## Phase 9: Production Delivery
 
