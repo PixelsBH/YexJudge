@@ -101,11 +101,13 @@ type Status string
 type SubmissionStatus string
 
 type Result struct {
-	Status         Status    `json:"status"`
-	RuntimeMs      int       `json:"runtimeMs,omitempty"`
-	MemoryMb       int       `json:"memoryMb,omitempty"`
-	FailedTestCase *TestCase `json:"failedTestCase,omitempty"`
-	ErrorMessage   string    `json:"errorMessage,omitempty"`
+	Status          Status    `json:"status"`
+	PassedTestCases int       `json:"passedTestCases"`
+	TotalTestCases  int       `json:"totalTestCases"`
+	RuntimeMs       int       `json:"runtimeMs,omitempty"`
+	MemoryMb        int       `json:"memoryMb,omitempty"`
+	FailedTestCase  *TestCase `json:"failedTestCase,omitempty"`
+	ErrorMessage    string    `json:"errorMessage,omitempty"`
 }
 
 type Submission struct {

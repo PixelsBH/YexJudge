@@ -15,6 +15,9 @@ func runTestCases(
 	ctx context.Context, executor Executor,
 	sandbox *Sandbox, job Job, spec languages.Spec) (Result, error) {
 	maxRuntimeMs := 0
+	var maxMemoryBytes int64
+	total := len(job.TestCases)
+	passed := 0
 
 	for _, tc := range job.TestCases {
 		ctxRun, cancelRun := context.WithTimeout(
@@ -38,38 +41,54 @@ func runTestCases(
 			return Result{}, fmt.Errorf("executor returned no run result for test case %d", tc.ID)
 		}
 		runtimeMs := int(runRes.TimeUsed.Milliseconds())
+		if runRes.MemoryUsed > maxMemoryBytes {
+			maxMemoryBytes = runRes.MemoryUsed
+		}
+		memoryMb := int(maxMemoryBytes / (1024 * 1024))
 		if ctx.Err() != nil {
 			return Result{
-				Status:         InfrastructureError,
-				RuntimeMs:      runtimeMs,
-				FailedTestCase: failedTestCase(tc, runRes.Stdout),
-				ErrorMessage:   "program execution was canceled",
+				Status:          InfrastructureError,
+				PassedTestCases: passed,
+				TotalTestCases:  total,
+				RuntimeMs:       runtimeMs,
+				MemoryMb:        memoryMb,
+				FailedTestCase:  failedTestCase(tc, runRes.Stdout),
+				ErrorMessage:    "program execution was canceled",
 			}, nil
 		}
 
 		if runRes.OutputLimitExceeded {
 			return Result{
-				Status:         OutputLimitExceeded,
-				RuntimeMs:      runtimeMs,
-				FailedTestCase: failedTestCase(tc, runRes.Stdout),
-				ErrorMessage:   "program output exceeded the allowed limit",
+				Status:          OutputLimitExceeded,
+				PassedTestCases: passed,
+				TotalTestCases:  total,
+				RuntimeMs:       runtimeMs,
+				MemoryMb:        memoryMb,
+				FailedTestCase:  failedTestCase(tc, runRes.Stdout),
+				ErrorMessage:    "program output exceeded the allowed limit",
 			}, nil
 		}
 
 		if runRes.TimedOut {
 			return Result{
-				Status:         TimeLimitExceeded,
-				RuntimeMs:      runtimeMs,
-				FailedTestCase: failedTestCase(tc, runRes.Stdout),
+				Status:          TimeLimitExceeded,
+				PassedTestCases: passed,
+				TotalTestCases:  total,
+				RuntimeMs:       runtimeMs,
+				MemoryMb:        memoryMb,
+				FailedTestCase:  failedTestCase(tc, runRes.Stdout),
 			}, nil
 		}
 
 		if runRes.ExitCode != 0 {
 			return Result{
-				Status:         RuntimeError,
-				RuntimeMs:      runtimeMs,
-				FailedTestCase: failedTestCase(tc, runRes.Stdout),
-				ErrorMessage:   runRes.Stderr,
+				Status:          RuntimeError,
+				PassedTestCases: passed,
+				TotalTestCases:  total,
+				RuntimeMs:       runtimeMs,
+				MemoryMb:        memoryMb,
+				FailedTestCase:  failedTestCase(tc, runRes.Stdout),
+				ErrorMessage:    runRes.Stderr,
 			}, nil
 		}
 
@@ -82,20 +101,27 @@ func runTestCases(
 
 		if output != expected {
 			return Result{
-				Status:         WrongAnswer,
-				RuntimeMs:      runtimeMs,
-				FailedTestCase: failedTestCase(tc, output),
+				Status:          WrongAnswer,
+				PassedTestCases: passed,
+				TotalTestCases:  total,
+				RuntimeMs:       runtimeMs,
+				MemoryMb:        memoryMb,
+				FailedTestCase:  failedTestCase(tc, output),
 			}, nil
 		}
 
+		passed++
 		if runtimeMs > maxRuntimeMs {
 			maxRuntimeMs = runtimeMs
 		}
 	}
 
 	return Result{
-		Status:    Accepted,
-		RuntimeMs: maxRuntimeMs,
+		Status:          Accepted,
+		PassedTestCases: passed,
+		TotalTestCases:  total,
+		RuntimeMs:       maxRuntimeMs,
+		MemoryMb:        int(maxMemoryBytes / (1024 * 1024)),
 	}, nil
 }
 

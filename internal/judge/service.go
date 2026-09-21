@@ -70,8 +70,9 @@ func (s *Service) ProcessSubmission(ctx context.Context, submission Submission) 
 	}()
 	if err := ValidateJob(submission.Job); err != nil {
 		result := Result{
-			Status:       ValidationError,
-			ErrorMessage: err.Error(),
+			Status:         ValidationError,
+			TotalTestCases: len(submission.Job.TestCases),
+			ErrorMessage:   err.Error(),
 		}
 		submission.Status = SubmissionFinished
 		submission.Result = &result
@@ -84,8 +85,9 @@ func (s *Service) ProcessSubmission(ctx context.Context, submission Submission) 
 	spec, ok := s.registry.Get(submission.Job.Language)
 	if !ok {
 		result := Result{
-			Status:       ValidationError,
-			ErrorMessage: "unsupported language",
+			Status:         ValidationError,
+			TotalTestCases: len(submission.Job.TestCases),
+			ErrorMessage:   "unsupported language",
 		}
 		submission.Status = SubmissionFinished
 		submission.Result = &result
@@ -101,8 +103,9 @@ func (s *Service) ProcessSubmission(ctx context.Context, submission Submission) 
 	}
 	infrastructureFailure := func(message string) (Result, error) {
 		result := Result{
-			Status:       InfrastructureError,
-			ErrorMessage: message,
+			Status:         InfrastructureError,
+			TotalTestCases: len(submission.Job.TestCases),
+			ErrorMessage:   message,
 		}
 		submission.Status = SubmissionFailed
 		submission.Result = &result
@@ -150,8 +153,9 @@ func (s *Service) ProcessSubmission(ctx context.Context, submission Submission) 
 
 		if compileRes.OutputLimitExceeded {
 			result := Result{
-				Status:       OutputLimitExceeded,
-				ErrorMessage: "compiler output exceeded the allowed limit",
+				Status:         OutputLimitExceeded,
+				TotalTestCases: len(submission.Job.TestCases),
+				ErrorMessage:   "compiler output exceeded the allowed limit",
 			}
 
 			submission.Status = SubmissionFinished
@@ -168,8 +172,9 @@ func (s *Service) ProcessSubmission(ctx context.Context, submission Submission) 
 
 		if compileRes.ExitCode != 0 {
 			result := Result{
-				Status:       CompilationError,
-				ErrorMessage: compileRes.Stderr,
+				Status:         CompilationError,
+				TotalTestCases: len(submission.Job.TestCases),
+				ErrorMessage:   compileRes.Stderr,
 			}
 
 			submission.Status = SubmissionFinished

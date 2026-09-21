@@ -95,9 +95,10 @@ func TestRunTestCasesMapsVerdicts(t *testing.T) {
 		{
 			name: "accepted",
 			run: &runner.RunResult{
-				Stdout:   " expected \n",
-				ExitCode: 0,
-				TimeUsed: 7 * time.Millisecond,
+				Stdout:     " expected \n",
+				ExitCode:   0,
+				TimeUsed:   7 * time.Millisecond,
+				MemoryUsed: 2 * 1024 * 1024,
 			},
 			wantStatus:    Accepted,
 			wantRuntimeMs: 7,
@@ -158,6 +159,12 @@ func TestRunTestCasesMapsVerdicts(t *testing.T) {
 				if result.RuntimeMs != tt.wantRuntimeMs {
 					t.Fatalf("runtimeMs = %d, want %d", result.RuntimeMs, tt.wantRuntimeMs)
 				}
+				if result.PassedTestCases != 1 || result.TotalTestCases != 1 {
+					t.Fatalf("passed/total = %d/%d, want 1/1", result.PassedTestCases, result.TotalTestCases)
+				}
+				if result.MemoryMb != 2 {
+					t.Fatalf("memoryMb = %d, want 2", result.MemoryMb)
+				}
 				return
 			}
 			if result.FailedTestCase == nil {
@@ -169,6 +176,9 @@ func TestRunTestCasesMapsVerdicts(t *testing.T) {
 			if result.ErrorMessage != tt.wantError {
 				t.Fatalf("errorMessage = %q, want %q", result.ErrorMessage, tt.wantError)
 			}
+			if result.PassedTestCases != 0 || result.TotalTestCases != 1 {
+				t.Fatalf("passed/total = %d/%d, want 0/1", result.PassedTestCases, result.TotalTestCases)
+			}
 		})
 	}
 }
@@ -177,8 +187,8 @@ func TestRunTestCasesUsesMaximumRuntime(t *testing.T) {
 	job := testCaseJob("ok")
 	job.TestCases = []TestCase{{ID: 1, ExpectedOutput: "ok"}, {ID: 2, ExpectedOutput: "ok"}}
 	executor := &testcaseExecutor{runs: []*runner.RunResult{
-		{Stdout: "ok", ExitCode: 0, TimeUsed: 4 * time.Millisecond},
-		{Stdout: "ok", ExitCode: 0, TimeUsed: 12 * time.Millisecond},
+		{Stdout: "ok", ExitCode: 0, TimeUsed: 4 * time.Millisecond, MemoryUsed: 1024 * 1024},
+		{Stdout: "ok", ExitCode: 0, TimeUsed: 12 * time.Millisecond, MemoryUsed: 3 * 1024 * 1024},
 	}}
 
 	result, err := runTestCases(context.Background(), executor, &Sandbox{ContainerName: "test"}, job, languages.Python{})
@@ -187,6 +197,12 @@ func TestRunTestCasesUsesMaximumRuntime(t *testing.T) {
 	}
 	if result.Status != Accepted || result.RuntimeMs != 12 {
 		t.Fatalf("result = %+v, want accepted with 12ms", result)
+	}
+	if result.PassedTestCases != 2 || result.TotalTestCases != 2 {
+		t.Fatalf("passed/total = %d/%d, want 2/2", result.PassedTestCases, result.TotalTestCases)
+	}
+	if result.MemoryMb != 3 {
+		t.Fatalf("memoryMb = %d, want 3", result.MemoryMb)
 	}
 }
 
@@ -216,6 +232,9 @@ func TestProcessSubmissionMapsCompilationError(t *testing.T) {
 	}
 	if result.Status != CompilationError || result.ErrorMessage != "missing semicolon" {
 		t.Fatalf("result = %+v, want compilation error", result)
+	}
+	if result.TotalTestCases != 1 {
+		t.Fatalf("totalTestCases = %d, want 1", result.TotalTestCases)
 	}
 	if store.submission.Status != SubmissionFinished || store.submission.Result == nil {
 		t.Fatalf("stored submission = %+v, want finished result", store.submission)
@@ -254,5 +273,42 @@ func TestProcessSubmissionPersistsInfrastructureResult(t *testing.T) {
 	}
 	if store.submission.Result.Status != InfrastructureError || !strings.Contains(store.submission.Result.ErrorMessage, "permission denied") {
 		t.Fatalf("stored result = %+v, want diagnostic", store.submission.Result)
+	}
+	if result.TotalTestCases != 1 {
+		t.Fatalf("totalTestCases = %d, want 1", result.TotalTestCases)
+	}
+}
+
+func TestRunTestCasesPassedCountOnFailure(t *testing.T) {
+	job := testCaseJob("ok")
+	job.TestCases = []TestCase{
+		{ID: 1, ExpectedOutput: "ok"},
+		{ID: 2, ExpectedOutput: "ok"},
+		{ID: 3, ExpectedOutput: "ok"},
+	}
+	executor := &testcaseExecutor{runs: []*runner.RunResult{
+		{Stdout: "ok", ExitCode: 0, TimeUsed: 2 * time.Millisecond, MemoryUsed: 1024 * 1024},
+		{Stdout: "ok", ExitCode: 0, TimeUsed: 3 * time.Millisecond, MemoryUsed: 5 * 1024 * 1024},
+		{Stdout: "wrong", ExitCode: 0, TimeUsed: 1 * time.Millisecond, MemoryUsed: 2 * 1024 * 1024},
+	}}
+
+	result, err := runTestCases(context.Background(), executor, &Sandbox{ContainerName: "test"}, job, languages.Python{})
+	if err != nil {
+		t.Fatalf("runTestCases() error = %v", err)
+	}
+	if result.Status != WrongAnswer {
+		t.Fatalf("status = %q, want wrong_answer", result.Status)
+	}
+	if result.PassedTestCases != 2 {
+		t.Fatalf("passedTestCases = %d, want 2", result.PassedTestCases)
+	}
+	if result.TotalTestCases != 3 {
+		t.Fatalf("totalTestCases = %d, want 3", result.TotalTestCases)
+	}
+	if result.MemoryMb != 5 {
+		t.Fatalf("memoryMb = %d, want 5 (max across all executed cases)", result.MemoryMb)
+	}
+	if result.FailedTestCase == nil || result.FailedTestCase.ID != 3 {
+		t.Fatalf("expected failed test case ID 3, got %+v", result.FailedTestCase)
 	}
 }
