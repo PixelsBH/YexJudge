@@ -110,7 +110,7 @@ type Result struct {
 	PassedTestCases int       `json:"passedTestCases"`
 	TotalTestCases  int       `json:"totalTestCases"`
 	RuntimeMs       int       `json:"runtimeMs,omitempty"`
-	MemoryMb        int       `json:"memoryMb,omitempty"`
+	MemoryMb        float64   `json:"memoryMb,omitempty"`
 	FailedTestCase  *TestCase `json:"failedTestCase,omitempty"`
 	ErrorMessage    string    `json:"errorMessage,omitempty"`
 }

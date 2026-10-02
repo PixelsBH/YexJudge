@@ -167,7 +167,7 @@ func TestRunTestCasesMapsVerdicts(t *testing.T) {
 					t.Fatalf("passed/total = %d/%d, want 1/1", result.PassedTestCases, result.TotalTestCases)
 				}
 				if result.MemoryMb != 2 {
-					t.Fatalf("memoryMb = %d, want 2", result.MemoryMb)
+					t.Fatalf("memoryMb = %v, want 2", result.MemoryMb)
 				}
 				return
 			}
@@ -344,6 +344,30 @@ public:
 	}
 }
 
+func TestRunTestCasesPreservesSubMiBMemory(t *testing.T) {
+	job := testCaseJob("ok")
+	executor := &testcaseExecutor{runs: []*runner.RunResult{{
+		Stdout:     "ok",
+		ExitCode:   0,
+		MemoryUsed: 512 * 1024,
+	}}}
+
+	result, err := runTestCases(context.Background(), executor, &Sandbox{ContainerName: "test"}, job, languages.Python{})
+	if err != nil {
+		t.Fatalf("runTestCases() error = %v", err)
+	}
+	if result.MemoryMb != 0.5 {
+		t.Fatalf("memoryMb = %v, want 0.5", result.MemoryMb)
+	}
+	payload, err := json.Marshal(result)
+	if err != nil {
+		t.Fatalf("marshal result: %v", err)
+	}
+	if !strings.Contains(string(payload), `"memoryMb":0.5`) {
+		t.Fatalf("serialized result = %s, want fractional memoryMb", payload)
+	}
+}
+
 func TestRunTestCasesUsesMaximumRuntime(t *testing.T) {
 	job := testCaseJob("ok")
 	job.TestCases = []TestCase{{ID: 1, ExpectedOutput: "ok"}, {ID: 2, ExpectedOutput: "ok"}}
@@ -363,7 +387,7 @@ func TestRunTestCasesUsesMaximumRuntime(t *testing.T) {
 		t.Fatalf("passed/total = %d/%d, want 2/2", result.PassedTestCases, result.TotalTestCases)
 	}
 	if result.MemoryMb != 3 {
-		t.Fatalf("memoryMb = %d, want 3", result.MemoryMb)
+		t.Fatalf("memoryMb = %v, want 3", result.MemoryMb)
 	}
 }
 
@@ -467,7 +491,7 @@ func TestRunTestCasesPassedCountOnFailure(t *testing.T) {
 		t.Fatalf("totalTestCases = %d, want 3", result.TotalTestCases)
 	}
 	if result.MemoryMb != 5 {
-		t.Fatalf("memoryMb = %d, want 5 (max across all executed cases)", result.MemoryMb)
+		t.Fatalf("memoryMb = %v, want 5 (max across all executed cases)", result.MemoryMb)
 	}
 	if result.FailedTestCase == nil || result.FailedTestCase.ID != 3 {
 		t.Fatalf("expected failed test case ID 3, got %+v", result.FailedTestCase)

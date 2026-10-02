@@ -44,7 +44,7 @@ func runTestCases(
 		if runRes.MemoryUsed > maxMemoryBytes {
 			maxMemoryBytes = runRes.MemoryUsed
 		}
-		memoryMb := int(maxMemoryBytes / (1024 * 1024))
+		memoryMb := float64(maxMemoryBytes) / (1024 * 1024)
 		if ctx.Err() != nil {
 			return Result{
 				Status:          InfrastructureError,
@@ -121,7 +121,7 @@ func runTestCases(
 		PassedTestCases: passed,
 		TotalTestCases:  total,
 		RuntimeMs:       maxRuntimeMs,
-		MemoryMb:        int(maxMemoryBytes / (1024 * 1024)),
+		MemoryMb:        float64(maxMemoryBytes) / (1024 * 1024),
 	}, nil
 }
 

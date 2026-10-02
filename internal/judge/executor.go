@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 	"yexjudge/internal/judge/languages"
@@ -340,10 +341,15 @@ func (e *DockerExecutor) RunTestCase(
 	input string,
 	spec languages.Spec,
 ) (*runner.RunResult, error) {
+	memoryMarker := fmt.Sprintf("__YEXJUDGE_MAX_RSS_KB_%d:", time.Now().UnixNano())
 	execArgs := []string{
 		"exec",
 		"-i",
 		sandbox.ContainerName,
+		"/usr/bin/time",
+		"-f",
+		memoryMarker + "%M\\n",
+		"--",
 	}
 	execArgs = append(execArgs, spec.RunCommand()...)
 
@@ -356,6 +362,7 @@ func (e *DockerExecutor) RunTestCase(
 	if err != nil {
 		return nil, err
 	}
+	result.Stderr, result.MemoryUsed = extractMeasuredMemory(result.Stderr, memoryMarker)
 
 	// docker exec is a client-side command. Canceling that client does not
 	// reliably terminate the process that the daemon started in the sandbox.
@@ -392,4 +399,22 @@ func (e *DockerExecutor) RunTestCase(
 		result.TimedOut = true
 	}
 	return result, nil
+}
+
+func extractMeasuredMemory(stderr, marker string) (string, int64) {
+	markerIndex := strings.LastIndex(stderr, marker)
+	if markerIndex < 0 {
+		return stderr, 0
+	}
+
+	memoryOutput := stderr[markerIndex+len(marker):]
+	if newline := strings.IndexByte(memoryOutput, '\n'); newline >= 0 {
+		memoryOutput = memoryOutput[:newline]
+	}
+	memoryKB, err := strconv.ParseInt(strings.TrimSpace(memoryOutput), 10, 64)
+	if err != nil || memoryKB < 0 {
+		return stderr, 0
+	}
+
+	return stderr[:markerIndex], memoryKB * 1024
 }

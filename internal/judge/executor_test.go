@@ -119,6 +119,47 @@ func TestDockerExecutorRestartsSandboxAfterOutputLimit(t *testing.T) {
 	}
 }
 
+func TestDockerExecutorMeasuresPeakResidentMemory(t *testing.T) {
+	recorder := &recordingRunner{resultFor: func(call executorCall) *runner.RunResult {
+		for i, arg := range call.args {
+			if arg != "-f" || i+1 >= len(call.args) {
+				continue
+			}
+			format := call.args[i+1]
+			markerStart := strings.Index(format, "__YEXJUDGE_MAX_RSS_KB_")
+			if markerStart < 0 {
+				continue
+			}
+			markerLength := strings.Index(format[markerStart:], "%M")
+			if markerLength < 0 {
+				continue
+			}
+			marker := format[markerStart : markerStart+markerLength]
+			return &runner.RunResult{ExitCode: 0, Stderr: "program warning" + marker + "256\n"}
+		}
+		return nil
+	}}
+
+	result, err := NewDockerExecutor(recorder).RunTestCase(
+		context.Background(),
+		&Sandbox{ContainerName: "sandbox"},
+		"input",
+		languages.Python{},
+	)
+	if err != nil {
+		t.Fatalf("RunTestCase() error = %v", err)
+	}
+	if result.MemoryUsed != 256*1024 {
+		t.Fatalf("MemoryUsed = %d bytes, want 256 KiB", result.MemoryUsed)
+	}
+	if result.Stderr != "program warning" {
+		t.Fatalf("Stderr = %q, want program stderr without the time marker", result.Stderr)
+	}
+	if len(recorder.calls) != 1 || !hasExecutorArg(recorder.calls[0].args, "exec", "-i", "sandbox", "/usr/bin/time", "-f") {
+		t.Fatalf("docker calls = %+v, want execution wrapped by GNU time", recorder.calls)
+	}
+}
+
 func TestDockerExecutorMarksDeadlineAndRestartsSandbox(t *testing.T) {
 	recorder := &recordingRunner{result: &runner.RunResult{}}
 	executor := NewDockerExecutor(recorder)
