@@ -137,6 +137,9 @@ func validateFunctionJob(job Job) error {
 	if err != nil {
 		return err
 	}
+	if err := validateFunctionComparison(job.Function.Comparison, returnType, returnObserved); err != nil {
+		return err
+	}
 	if err := validateFunctionPostconditions(*job.Function, returnType, paramTypes); err != nil {
 		return err
 	}
@@ -232,6 +235,22 @@ func validateFunctionObservations(function FunctionSpec, returnType functiontype
 		}
 	}
 	return returnObserved, parameterObservations, nil
+}
+
+func validateFunctionComparison(comparison *FunctionComparisonSpec, returnType functiontypes.Adapter, returnObserved bool) error {
+	if comparison == nil || comparison.ReturnArrayOrder == "" {
+		return nil
+	}
+	if comparison.ReturnArrayOrder != "unordered" {
+		return fmt.Errorf("unsupported returnArrayOrder %q", comparison.ReturnArrayOrder)
+	}
+	if !returnObserved {
+		return fmt.Errorf("unordered returnArrayOrder requires an observed return value")
+	}
+	if !strings.HasPrefix(returnType.CanonicalName(), "vector<") {
+		return fmt.Errorf("unordered returnArrayOrder requires a vector return type")
+	}
+	return nil
 }
 
 func validateFunctionPostconditions(function FunctionSpec, returnType functiontypes.Adapter, paramTypes []functiontypes.Adapter) error {

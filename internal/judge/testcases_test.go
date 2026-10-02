@@ -2,7 +2,11 @@ package judge
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -180,6 +184,163 @@ func TestRunTestCasesMapsVerdicts(t *testing.T) {
 				t.Fatalf("passed/total = %d/%d, want 0/1", result.PassedTestCases, result.TotalTestCases)
 			}
 		})
+	}
+}
+
+func TestRunTestCasesAppliesUnorderedArrayComparisonOptIn(t *testing.T) {
+	tests := []struct {
+		name         string
+		returnType   string
+		comparison   *FunctionComparisonSpec
+		observations []ObservationSpec
+		expected     string
+		actual       string
+		wantStatus   Status
+	}{
+		{
+			name:       "subset order ignored when enabled",
+			returnType: "vector<vector<int>>",
+			comparison: &FunctionComparisonSpec{ReturnArrayOrder: "unordered"},
+			expected:   `[[],[1],[2],[1,2],[3],[1,3],[2,3],[1,2,3]]`,
+			actual:     `[[],[1],[1,2],[1,2,3],[1,3],[2],[2,3],[3]]`,
+			wantStatus: Accepted,
+		},
+		{
+			name:       "strict order remains the default",
+			returnType: "vector<vector<int>>",
+			expected:   `[[1],[2]]`,
+			actual:     `[[2],[1]]`,
+			wantStatus: WrongAnswer,
+		},
+		{
+			name:       "duplicate values are counted",
+			returnType: "vector<int>",
+			comparison: &FunctionComparisonSpec{ReturnArrayOrder: "unordered"},
+			expected:   `[1,1,2]`,
+			actual:     `[1,2,2]`,
+			wantStatus: WrongAnswer,
+		},
+		{
+			name:       "nested array order remains significant",
+			returnType: "vector<vector<int>>",
+			comparison: &FunctionComparisonSpec{ReturnArrayOrder: "unordered"},
+			expected:   `[[1,2],[3]]`,
+			actual:     `[[2,1],[3]]`,
+			wantStatus: WrongAnswer,
+		},
+		{
+			name:         "unordered return observation",
+			returnType:   "vector<int>",
+			comparison:   &FunctionComparisonSpec{ReturnArrayOrder: "unordered"},
+			observations: []ObservationSpec{{Kind: "return"}},
+			expected:     `{"return":[1,2]}`,
+			actual:       `{"return":[2,1]}`,
+			wantStatus:   Accepted,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			job := Job{
+				Language:   "cpp",
+				SourceCode: "class Solution {};",
+				Function: &FunctionSpec{
+					Name:         "solve",
+					ReturnType:   test.returnType,
+					Observations: test.observations,
+					Comparison:   test.comparison,
+				},
+				TestCases: []TestCase{{ID: 1, Expected: json.RawMessage(test.expected)}},
+				Limits:    Limits{TimeLimitMs: 1000, MemoryLimitMb: 128},
+			}
+			executor := &testcaseExecutor{runs: []*runner.RunResult{{Stdout: test.actual, ExitCode: 0}}}
+			result, err := runTestCases(context.Background(), executor, &Sandbox{ContainerName: "test"}, job, languages.Cpp{})
+			if err != nil {
+				t.Fatalf("runTestCases() error = %v", err)
+			}
+			if result.Status != test.wantStatus {
+				t.Fatalf("status = %q, want %q", result.Status, test.wantStatus)
+			}
+		})
+	}
+}
+
+func TestSubsetsSolutionWithDifferentOutputOrderIsAccepted(t *testing.T) {
+	gxx, err := exec.LookPath("g++")
+	if err != nil {
+		t.Skip("g++ is not installed")
+	}
+
+	job := Job{
+		Language: "cpp",
+		SourceCode: `class Solution {
+public:
+    vector<vector<int>> subsets(vector<int>& nums) {
+        vector<vector<int>> result;
+        vector<int> current;
+        function<void(int)> generate = [&](int index) {
+            if (index == static_cast<int>(nums.size())) {
+                result.push_back(current);
+                return;
+            }
+            generate(index + 1);
+            current.push_back(nums[index]);
+            generate(index + 1);
+            current.pop_back();
+        };
+        generate(0);
+        return result;
+    }
+};`,
+		Function: &FunctionSpec{
+			Name:       "subsets",
+			ReturnType: "vector<vector<int>>",
+			Params:     []FunctionParam{{Name: "nums", Type: "vector<int>&"}},
+			Comparison: &FunctionComparisonSpec{ReturnArrayOrder: "unordered"},
+		},
+		TestCases: []TestCase{{
+			ID:       1,
+			Args:     []json.RawMessage{json.RawMessage(`[1,2,3]`)},
+			Expected: json.RawMessage(`[[],[1],[2],[1,2],[3],[1,3],[2,3],[1,2,3]]`),
+		}},
+		Limits: Limits{TimeLimitMs: 1000, MemoryLimitMb: 128},
+	}
+	if err := ValidateJob(job); err != nil {
+		t.Fatalf("ValidateJob() error = %v", err)
+	}
+
+	source, err := buildCppFunctionHarness(job)
+	if err != nil {
+		t.Fatalf("buildCppFunctionHarness() error = %v", err)
+	}
+	directory := t.TempDir()
+	sourcePath := filepath.Join(directory, "main.cpp")
+	binaryPath := filepath.Join(directory, "main")
+	if err := os.WriteFile(sourcePath, []byte(source), 0600); err != nil {
+		t.Fatal(err)
+	}
+	compile := exec.Command(gxx, "-std=c++17", sourcePath, "-o", binaryPath)
+	if output, err := compile.CombinedOutput(); err != nil {
+		t.Fatalf("generated subset solution did not compile: %v\n%s", err, output)
+	}
+
+	run := exec.Command(binaryPath)
+	run.Stdin = strings.NewReader("1\n")
+	actual, err := run.CombinedOutput()
+	if err != nil {
+		t.Fatalf("generated subset solution failed: %v\n%s", err, actual)
+	}
+	if got, want := string(actual), `[[],[3],[2],[2,3],[1],[1,3],[1,2],[1,2,3]]`; got != want {
+		t.Fatalf("generated subset output = %q, want deliberately reordered output %q", got, want)
+	}
+
+	executor := &testcaseExecutor{runs: []*runner.RunResult{{Stdout: string(actual), ExitCode: 0}}}
+	result, err := runTestCases(context.Background(), executor, &Sandbox{ContainerName: "test"}, job, languages.Cpp{})
+	if err != nil {
+		t.Fatalf("runTestCases() error = %v", err)
+	}
+	if result.Status != Accepted {
+		t.Fatalf("result status = %q, want accepted for equivalent subset order", result.Status)
 	}
 }
 

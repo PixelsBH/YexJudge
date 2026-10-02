@@ -3,6 +3,7 @@ package types
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -63,6 +64,24 @@ func (a vectorAdapter) CanonicalJSON(raw json.RawMessage) (string, error) {
 		}
 		canonical = append(canonical, item)
 	}
+	return "[" + strings.Join(canonical, ",") + "]", nil
+}
+
+func (a vectorAdapter) CanonicalUnorderedJSON(raw json.RawMessage) (string, error) {
+	values, err := arrayValues(raw)
+	if err != nil {
+		return "", err
+	}
+
+	canonical := make([]string, 0, len(values))
+	for i, value := range values {
+		item, err := a.element.CanonicalJSON(value)
+		if err != nil {
+			return "", fmt.Errorf("element %d: %w", i, err)
+		}
+		canonical = append(canonical, item)
+	}
+	sort.Strings(canonical)
 	return "[" + strings.Join(canonical, ",") + "]", nil
 }
 

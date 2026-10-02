@@ -24,11 +24,16 @@ type FunctionParam struct {
 }
 
 type FunctionSpec struct {
-	Name           string              `json:"name"`
-	ReturnType     string              `json:"returnType"`
-	Params         []FunctionParam     `json:"params"`
-	Observations   []ObservationSpec   `json:"observations,omitempty"`
-	Postconditions []PostconditionSpec `json:"postconditions,omitempty"`
+	Name           string                  `json:"name"`
+	ReturnType     string                  `json:"returnType"`
+	Params         []FunctionParam         `json:"params"`
+	Observations   []ObservationSpec       `json:"observations,omitempty"`
+	Postconditions []PostconditionSpec     `json:"postconditions,omitempty"`
+	Comparison     *FunctionComparisonSpec `json:"comparison,omitempty"`
+}
+
+type FunctionComparisonSpec struct {
+	ReturnArrayOrder string `json:"returnArrayOrder,omitempty"`
 }
 
 type ClassSpec struct {

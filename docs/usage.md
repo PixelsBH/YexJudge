@@ -110,6 +110,21 @@ curl -X POST http://localhost:8080/submissions \
 
 Supported C++ Function Mode types include `int`, `long long`, `double`, `bool`, `string`, recursive `vector<T>` and `optional<T>` values, and the registered `ListNode*`, `TreeNode*`, `RandomListNode*`, random-pointer `Node*`, and `GraphNode*` types. Reference parameters such as `vector<int>&` and `const vector<int>&` are accepted. Identity-sensitive metadata can declare generic `disjoint` or `same_as` postconditions; raw memory addresses are never exposed.
 
+### Order-insensitive return arrays
+
+By default, returned arrays are compared in order. For a problem where the top-level order of a returned vector does not matter, opt in per function:
+
+```json
+"function": {
+  "name": "subsets",
+  "returnType": "vector<vector<int>>",
+  "params": [{ "name": "nums", "type": "vector<int>&" }],
+  "comparison": { "returnArrayOrder": "unordered" }
+}
+```
+
+This compares the returned vector's top-level elements as a multiset: each element must match and duplicate counts are preserved, but their order is ignored. Nested arrays retain their order. Omit `comparison` (or `returnArrayOrder`) to keep normal order-sensitive comparison.
+
 ## C++ Class Mode
 
 Class Mode constructs a user class and runs a metadata-defined sequence of operations. The contract is generic and supports stateful designs without problem-specific drivers. A testcase declares `constructorArgs`, `operations`, and one expected result per operation:

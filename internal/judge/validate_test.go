@@ -31,6 +31,65 @@ func TestValidateJobAcceptsFunctionMetadataAndTypedJSON(t *testing.T) {
 	}
 }
 
+func TestValidateJobAcceptsUnorderedReturnArrayComparison(t *testing.T) {
+	job := validFunctionJob()
+	job.Function.ReturnType = "vector<vector<int>>"
+	job.Function.Comparison = &FunctionComparisonSpec{ReturnArrayOrder: "unordered"}
+	job.TestCases[0].Expected = json.RawMessage(`[[],[1],[2],[1,2]]`)
+	if err := ValidateJob(job); err != nil {
+		t.Fatalf("ValidateJob() error = %v", err)
+	}
+}
+
+func TestValidateJobRejectsInvalidUnorderedReturnArrayComparison(t *testing.T) {
+	tests := []struct {
+		name string
+		job  func() Job
+		want string
+	}{
+		{
+			name: "unsupported policy",
+			job: func() Job {
+				job := validFunctionJob()
+				job.Function.Comparison = &FunctionComparisonSpec{ReturnArrayOrder: "any"}
+				return job
+			},
+			want: "unsupported returnArrayOrder",
+		},
+		{
+			name: "non-vector return",
+			job: func() Job {
+				job := validFunctionJob()
+				job.Function.Comparison = &FunctionComparisonSpec{ReturnArrayOrder: "unordered"}
+				return job
+			},
+			want: "requires a vector return type",
+		},
+		{
+			name: "return not observed",
+			job: func() Job {
+				job := validFunctionJob()
+				job.Function.ReturnType = "vector<int>"
+				job.Function.Params = []FunctionParam{{Name: "values", Type: "vector<int>&"}}
+				job.Function.Observations = []ObservationSpec{{Kind: "parameter", Parameter: 0}}
+				job.Function.Comparison = &FunctionComparisonSpec{ReturnArrayOrder: "unordered"}
+				job.TestCases[0].Args = []json.RawMessage{json.RawMessage(`[1]`)}
+				job.TestCases[0].Expected = json.RawMessage(`{"parameter":{"0":[1]}}`)
+				return job
+			},
+			want: "requires an observed return value",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if err := ValidateJob(test.job()); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("ValidateJob() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
 func TestValidateJobRejectsMalformedFunctionValues(t *testing.T) {
 	job := validFunctionJob()
 	job.Function.Params = []FunctionParam{{Name: "value", Type: "int"}}

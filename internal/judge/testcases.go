@@ -99,7 +99,7 @@ func runTestCases(
 		}
 		expected = strings.TrimSpace(expected)
 
-		if output != expected {
+		if !functionOutputsEqual(job, output, expected) {
 			return Result{
 				Status:          WrongAnswer,
 				PassedTestCases: passed,
@@ -123,6 +123,45 @@ func runTestCases(
 		RuntimeMs:       maxRuntimeMs,
 		MemoryMb:        int(maxMemoryBytes / (1024 * 1024)),
 	}, nil
+}
+
+func functionOutputsEqual(job Job, actual, expected string) bool {
+	if job.Function == nil || job.Function.Comparison == nil || job.Function.Comparison.ReturnArrayOrder != "unordered" {
+		return actual == expected
+	}
+
+	registry := functiontypes.DefaultRegistry()
+	actual, err := canonicalizeUnorderedFunctionOutput(actual, job.Function, registry)
+	if err != nil {
+		return false
+	}
+	expected, err = canonicalizeUnorderedFunctionOutput(expected, job.Function, registry)
+	return err == nil && actual == expected
+}
+
+func canonicalizeUnorderedFunctionOutput(output string, function *FunctionSpec, registry *functiontypes.Registry) (string, error) {
+	if len(function.Observations) == 0 && len(function.Postconditions) == 0 {
+		return registry.CanonicalUnorderedArrayJSON(function.ReturnType, json.RawMessage(output))
+	}
+
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(output), &fields); err != nil {
+		return "", err
+	}
+	returnValue, ok := fields["return"]
+	if !ok {
+		return "", fmt.Errorf("return observation is missing")
+	}
+	canonicalReturn, err := registry.CanonicalUnorderedArrayJSON(function.ReturnType, returnValue)
+	if err != nil {
+		return "", err
+	}
+	fields["return"] = json.RawMessage(canonicalReturn)
+	canonicalOutput, err := json.Marshal(fields)
+	if err != nil {
+		return "", err
+	}
+	return string(canonicalOutput), nil
 }
 
 func failedTestCase(tc TestCase, actualOutput string) *TestCase {

@@ -91,6 +91,31 @@ func TestVectorLiteralAndCanonicalJSON(t *testing.T) {
 	}
 }
 
+func TestCanonicalUnorderedArrayJSONSortsOnlyTheOuterVector(t *testing.T) {
+	registry := DefaultRegistry()
+	got, err := registry.CanonicalUnorderedArrayJSON(
+		"vector<vector<int>>",
+		json.RawMessage(`[[2,1],[3],[1,2]]`),
+	)
+	if err != nil {
+		t.Fatalf("CanonicalUnorderedArrayJSON() error = %v", err)
+	}
+	if want := `[[1,2],[2,1],[3]]`; got != want {
+		t.Fatalf("CanonicalUnorderedArrayJSON() = %q, want %q", got, want)
+	}
+}
+
+func TestCanonicalUnorderedArrayJSONPreservesDuplicates(t *testing.T) {
+	registry := DefaultRegistry()
+	got, err := registry.CanonicalUnorderedArrayJSON("vector<int>", json.RawMessage(`[2,1,1]`))
+	if err != nil {
+		t.Fatalf("CanonicalUnorderedArrayJSON() error = %v", err)
+	}
+	if want := `[1,1,2]`; got != want {
+		t.Fatalf("CanonicalUnorderedArrayJSON() = %q, want %q", got, want)
+	}
+}
+
 func TestStringCanonicalJSONMatchesCxxJSONEscaping(t *testing.T) {
 	adapter, err := DefaultRegistry().Resolve("string")
 	if err != nil {

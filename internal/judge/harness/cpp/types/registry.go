@@ -141,6 +141,18 @@ func (r *Registry) CanonicalJSON(declaredType string, raw json.RawMessage) (stri
 	return adapter.CanonicalJSON(raw)
 }
 
+func (r *Registry) CanonicalUnorderedArrayJSON(declaredType string, raw json.RawMessage) (string, error) {
+	adapter, err := r.Resolve(declaredType)
+	if err != nil {
+		return "", err
+	}
+	vector, ok := adapter.(vectorAdapter)
+	if !ok {
+		return "", fmt.Errorf("C++ type %q is not a vector", declaredType)
+	}
+	return vector.CanonicalUnorderedJSON(raw)
+}
+
 // SupportSource returns each selected runtime type's helper declarations
 // exactly once. Primitive serializers remain in the C++ backend; custom type
 // declarations and graph helpers are contributed by their adapters. When no
