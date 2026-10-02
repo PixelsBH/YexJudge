@@ -26,7 +26,7 @@ See [`architecture.md`](architecture.md) for the full system description, packag
 
 ## Future Work 1: Adaptive Capacity
 
-Formerly Phase 7. Intentionally deferred until measured demand requires it.
+Intentionally deferred until measured demand requires it.
 
 ### Goal
 
@@ -59,7 +59,7 @@ Adjust worker, compile-worker, and runtime-sandbox capacity according to load wi
 
 ## Future Work 2: Additional Language Backends and Go Decision
 
-Formerly Phase 10. Intentionally deferred until a concrete product requirement exists.
+Intentionally deferred until a concrete product requirement exists.
 
 ### Goal
 
