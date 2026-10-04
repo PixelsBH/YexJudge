@@ -1,0 +1,176 @@
+# Standalone deployment: NEVER merge this with docker-compose.yml.
+name: yexjudge-production
+
+x-logging: &logging
+  driver: local
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  judge:
+    image: ${SERVER_IMAGE:?Set a reviewed server image with @sha256 digest}
+    pull_policy: never
+    user: "10001:10001"
+    group_add:
+      - "${DOCKER_SOCKET_GID:?Set the dedicated host Docker socket numeric group}"
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 256
+    mem_limit: 1g
+    memswap_limit: 1g
+    cpus: 2
+    ulimits:
+      nofile: {soft: 2048, hard: 2048}
+      core: {soft: 0, hard: 0}
+    environment:
+      APP_ENV: production
+      ALLOW_INSECURE_LOCAL: "false"
+      AUTH_CREDENTIALS_FILE: /run/secrets/service_credentials
+      DATABASE_URL_FILE: /run/secrets/database_url
+      AUTO_MIGRATE: "false"
+      ALLOWED_HOSTS: ${ALLOWED_HOSTS:?Set exact DNS hosts, including admin port 9443}
+      LISTEN_HOST: 0.0.0.0
+      PORT: "8080"
+      HOME: /tmp
+      DOCKER_HOST: unix:///var/run/docker.sock
+      TMPDIR: ${HOST_WORKSPACE_ROOT:?Set a dedicated absolute workspace directory}
+      HOST_WORKSPACE_ROOT: ${HOST_WORKSPACE_ROOT:?Set a dedicated absolute workspace directory}
+      RUNTIME_IMAGE: ${RUNTIME_IMAGE:?Set reviewed runtime @sha256 digest}
+      C_COMPILER_IMAGE: ${C_COMPILER_IMAGE:?Set reviewed C compiler @sha256 digest}
+      CPP_COMPILER_IMAGE: ${CPP_COMPILER_IMAGE:?Set reviewed C++ compiler @sha256 digest}
+      GO_COMPILER_IMAGE: ${GO_COMPILER_IMAGE:?Set reviewed Go compiler @sha256 digest}
+      JAVA_COMPILER_IMAGE: ${JAVA_COMPILER_IMAGE:?Set reviewed Java compiler @sha256 digest}
+      MAX_QUEUED: "100"
+      MAX_ACTIVE_PER_SERVICE: "32"
+      MAX_ACTIVE_PER_USER: "2"
+      SERVICE_REQUESTS_PER_MINUTE: "600"
+      USER_REQUESTS_PER_MINUTE: "120"
+      SERVICE_SUBMISSIONS_PER_MINUTE: "60"
+      USER_SUBMISSIONS_PER_MINUTE: "10"
+      HTTP_MAX_IN_FLIGHT: "64"
+      RETENTION_DAYS: "7"
+      EXPOSE_RESULT_DETAILS: "false"
+      ACCEPT_SUBMISSIONS: ${ACCEPT_SUBMISSIONS:-true}
+      DB_MAX_OPEN_CONNS: "16"
+      WORKER_COUNT: "4"
+      SANDBOX_POOL_SIZE: "4"
+      COMPILE_SLOTS: "2"
+      SUBMIT_TIMEOUT_MS: "10000"
+      QUEUE_POLL_INTERVAL_MS: "500"
+      QUEUE_LEASE_MS: "60000"
+      QUEUE_RECOVERY_INTERVAL_MS: "1000"
+      QUEUE_MAX_ATTEMPTS: "3"
+    volumes:
+      - type: bind
+        source: /var/run/docker.sock
+        target: /var/run/docker.sock
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${HOST_WORKSPACE_ROOT:?Set a dedicated absolute workspace directory}
+        target: ${HOST_WORKSPACE_ROOT:?Set a dedicated absolute workspace directory}
+        bind: {create_host_path: false, propagation: rprivate}
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=700,uid=10001,gid=10001
+    secrets: [service_credentials, database_url, postgres_ca]
+    networks: [api, database_egress]
+    healthcheck:
+      test: [CMD, /bin/sh, /usr/local/bin/yexjudge-readiness]
+      interval: 15s
+      timeout: 6s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
+    stop_grace_period: 30s
+    logging: *logging
+
+  proxy:
+    image: ${PROXY_IMAGE:?Set reviewed nginx Alpine image with @sha256 digest}
+    pull_policy: never
+    user: "10001:10001"
+    entrypoint: [/bin/sh, /etc/yexjudge/entrypoint.sh]
+    environment:
+      ALLOWED_HOSTS: ${ALLOWED_HOSTS:?Set exact DNS hosts, including admin port 9443}
+    depends_on:
+      judge: {condition: service_healthy}
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 64
+    mem_limit: 128m
+    memswap_limit: 128m
+    cpus: 1
+    ulimits:
+      nofile: {soft: 1024, hard: 1024}
+      core: {soft: 0, hard: 0}
+    ports:
+      - "${TLS_BIND_IP:?Set the intended TLS ingress bind IP}:443:8443"
+      # Administrative TLS stays loopback-only. Use an authenticated SSH tunnel.
+      - "127.0.0.1:9443:8444"
+    volumes:
+      - type: bind
+        source: ./docker/nginx/nginx.conf.template
+        target: /etc/yexjudge/nginx.conf.template
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ./docker/nginx/entrypoint.sh
+        target: /etc/yexjudge/entrypoint.sh
+        read_only: true
+        bind: {create_host_path: false}
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=700,uid=10001,gid=10001
+    secrets: [tls_certificate, tls_key]
+    networks: [ingress, api]
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:8081/health]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+    restart: unless-stopped
+    stop_signal: SIGQUIT
+    stop_grace_period: 30s
+    logging: *logging
+
+  migrate:
+    profiles: [migration]
+    image: ${SERVER_IMAGE:?Set a reviewed server image with @sha256 digest}
+    pull_policy: never
+    user: "10001:10001"
+    entrypoint: [/usr/local/bin/yexjudge-migrate]
+    environment:
+      APP_ENV: production
+      DATABASE_URL_FILE: /run/secrets/migration_database_url
+      HOME: /tmp
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 32
+    mem_limit: 128m
+    memswap_limit: 128m
+    cpus: 1
+    secrets: [migration_database_url, postgres_ca]
+    networks: [database_egress]
+    restart: "no"
+    stop_grace_period: 10s
+    logging: *logging
+
+# The API network has no external route. Only the judge/migrator have DB egress;
+# external PostgreSQL still requires host/cloud egress and database firewall rules.
+networks:
+  api: {internal: true}
+  ingress: {}
+  database_egress: {}
+
+# Compose file-backed secrets are protected host bind mounts, not an encrypted
+# secret manager. Provision ownership/modes on the host; Compose uid/gid/mode
+# remapping is not reliable for file-backed secrets.
+secrets:
+  service_credentials: {file: "${SERVICE_CREDENTIALS_SOURCE:?Set protected service credential JSON file}"}
+  database_url: {file: "${DATABASE_URL_SOURCE:?Set protected application database URL file}"}
+  migration_database_url: {file: "${MIGRATION_DATABASE_URL_SOURCE:?Set separate protected migration database URL file}"}
+  postgres_ca: {file: "${PG_CA_SOURCE:?Set managed PostgreSQL CA file}"}
+  tls_certificate: {file: "${TLS_CERT_SOURCE:?Set TLS certificate chain file}"}
+  tls_key: {file: "${TLS_KEY_SOURCE:?Set protected TLS private key file}"}

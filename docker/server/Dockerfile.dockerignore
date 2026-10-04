@@ -1,0 +1,14 @@
+# Explicit release build context; never send checkout secrets/workspaces to Docker.
+**
+!go.mod
+!go.sum
+!cmd/
+!cmd/**
+!internal/
+!internal/**
+!db/
+!db/**
+!docker/
+!docker/server/
+!docker/server/Dockerfile
+!docker/server/readiness.sh

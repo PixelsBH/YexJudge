@@ -7,6 +7,8 @@ import (
 )
 
 func TestValidateConfigDefaults(t *testing.T) {
+	t.Setenv("ALLOW_INSECURE_LOCAL", "true")
+	t.Setenv("DATABASE_URL", "postgres://localhost/yexjudge?sslmode=disable")
 	cfg, err := loadConfig()
 	if err != nil {
 		t.Fatalf("loadConfig() error = %v", err)
@@ -24,6 +26,8 @@ func TestLoadConfigRejectsInvalidCapacity(t *testing.T) {
 }
 
 func TestValidateConfigRejectsUnsafeMemoryReservation(t *testing.T) {
+	t.Setenv("ALLOW_INSECURE_LOCAL", "true")
+	t.Setenv("DATABASE_URL", "postgres://localhost/yexjudge?sslmode=disable")
 	cfg, err := loadConfig()
 	if err != nil {
 		t.Fatalf("loadConfig() error = %v", err)

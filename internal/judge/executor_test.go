@@ -2,6 +2,8 @@ package judge
 
 import (
 	"context"
+	"io"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +15,8 @@ import (
 type executorCall struct {
 	command string
 	args    []string
+	input   string
+	bounded bool
 }
 
 type recordingRunner struct {
@@ -21,21 +25,37 @@ type recordingRunner struct {
 	resultFor func(executorCall) *runner.RunResult
 }
 
-func (r *recordingRunner) Run(_ context.Context, _ string, command string, args ...string) (*runner.RunResult, error) {
-	call := executorCall{command: command, args: append([]string(nil), args...)}
+func (r *recordingRunner) Run(ctx context.Context, input string, command string, args ...string) (*runner.RunResult, error) {
+	_, bounded := ctx.Deadline()
+	call := executorCall{command: command, args: append([]string(nil), args...), input: input, bounded: bounded}
 	r.calls = append(r.calls, call)
 	if r.resultFor != nil {
 		if result := r.resultFor(call); result != nil {
 			return result, nil
 		}
 	}
+	if hasExecutorArg(args, "image", "inspect") {
+		return &runner.RunResult{Stdout: "null"}, nil
+	}
 	if strings.Contains(strings.Join(args, " "), "restart") {
 		return &runner.RunResult{ExitCode: 0}, nil
 	}
-	if r.result != nil {
-		return r.result, nil
+	if r.result != nil && hasExecutorArg(args, "/usr/bin/time") {
+		copy := *r.result
+		return &copy, nil
 	}
 	return &runner.RunResult{ExitCode: 0}, nil
+}
+
+func (r *recordingRunner) RunWithOutput(ctx context.Context, input string, output io.Writer, limit int64, command string, args ...string) (*runner.RunResult, error) {
+	result, err := r.Run(ctx, input, command, args...)
+	if err == nil {
+		if int64(len(result.Stdout)) > limit {
+			return &runner.RunResult{OutputLimitExceeded: true}, nil
+		}
+		_, err = io.WriteString(output, result.Stdout)
+	}
+	return result, err
 }
 
 func hasExecutorArg(args []string, want ...string) bool {
@@ -55,12 +75,22 @@ func hasExecutorArg(args []string, want ...string) bool {
 }
 
 func TestDockerExecutorCompileUsesRestrictedContainer(t *testing.T) {
-	recorder := &recordingRunner{}
+	workspace, err := createWorkspace(Job{SourceCode: "int main() {}"}, languages.Cpp{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(workspace)
+	recorder := &recordingRunner{resultFor: func(call executorCall) *runner.RunResult {
+		if hasExecutorArg(call.args, artifactExportScript) {
+			return &runner.RunResult{Stdout: testArtifactArchive(t, &testArtifact{name: "main", data: "binary"})}
+		}
+		return nil
+	}}
 	executor := NewDockerExecutor(recorder)
 
 	result, err := executor.Compile(
 		context.Background(),
-		"/tmp/workspace",
+		workspace,
 		languages.Cpp{},
 		Limits{TimeLimitMs: 1000, MemoryLimitMb: 128},
 	)
@@ -70,17 +100,23 @@ func TestDockerExecutorCompileUsesRestrictedContainer(t *testing.T) {
 	if result.ExitCode != 0 {
 		t.Fatalf("Compile() result = %+v, want success", result)
 	}
-	if len(recorder.calls) != 2 {
-		t.Fatalf("docker calls = %d, want compile plus cleanup", len(recorder.calls))
+	if len(recorder.calls) != 6 {
+		t.Fatalf("docker calls = %d, want image check, start, compile, quiesce, export and cleanup", len(recorder.calls))
 	}
-	args := recorder.calls[0].args
+	args := recorder.calls[1].args
 	for _, required := range [][]string{
 		{"--network", "none"},
 		{"--memory", "512m"},
 		{"--memory-swap", "512m"},
 		{"--pids-limit", "128"},
 		{"--cap-drop", "ALL"},
-		{"--security-opt", "no-new-privileges"},
+		{"--security-opt", "no-new-privileges:true"},
+		{"--pull", "never"},
+		{"--log-driver", "none"},
+		{"--no-healthcheck"},
+		{"--ipc", "private"},
+		{"--cgroupns", "private"},
+		{"--mount", "type=bind,src=" + workspace + ",dst=/source,readonly,bind-propagation=rprivate"},
 		{"--read-only"},
 		{"--user", compileContainerUser()},
 		{"--workdir", "/workspace"},
@@ -155,7 +191,7 @@ func TestDockerExecutorMeasuresPeakResidentMemory(t *testing.T) {
 	if result.Stderr != "program warning" {
 		t.Fatalf("Stderr = %q, want program stderr without the time marker", result.Stderr)
 	}
-	if len(recorder.calls) != 1 || !hasExecutorArg(recorder.calls[0].args, "exec", "-i", "sandbox", "/usr/bin/time", "-f") {
+	if len(recorder.calls) != 3 || !hasExecutorArg(recorder.calls[0].args, "exec", "-i", "sandbox", "/usr/bin/time", "-f") {
 		t.Fatalf("docker calls = %+v, want execution wrapped by GNU time", recorder.calls)
 	}
 }
@@ -219,8 +255,8 @@ func TestDockerExecutorRejectsNonzeroLifecycleExitCodes(t *testing.T) {
 			if !strings.Contains(err.Error(), "exited with code 17") {
 				t.Fatalf("error = %v, want exit-code diagnostic", err)
 			}
-			if len(err.Error()) > runner.DefaultOutputLimitBytes+100 {
-				t.Fatalf("error diagnostic was not capped: %d bytes", len(err.Error()))
+			if strings.Contains(err.Error(), "diagnostic") {
+				t.Fatalf("error leaked container stderr: %v", err)
 			}
 		})
 	}

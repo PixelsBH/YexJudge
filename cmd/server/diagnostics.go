@@ -17,6 +17,7 @@ var (
 )
 
 type diagnosticsResponse struct {
+	Security    securitySnapshot                           `json:"security"`
 	Timestamp   time.Time                                  `json:"timestamp"`
 	Submissions judge.SubmissionCounts                     `json:"submissions"`
 	Capacity    diagnosticsCapacity                        `json:"capacity"`
@@ -61,8 +62,13 @@ func diagnosticsHandler(w http.ResponseWriter, r *http.Request) {
 		poolStats = runtimePool.Stats()
 	}
 
+	security := securitySnapshot{}
+	if runtimeSecurity != nil {
+		security = runtimeSecurity.snapshot()
+	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(diagnosticsResponse{
+		Security:    security,
 		Timestamp:   time.Now().UTC(),
 		Submissions: counts,
 		Capacity:    diagnosticsCapacity{CompileSlots: runtimeCompileSlots},

@@ -51,9 +51,14 @@ func (s *Service) Metrics() *observability.Metrics { return s.metrics }
 func (s *Service) ProcessSubmission(ctx context.Context, submission Submission) (Result, error) {
 	processingStarted := time.Now()
 	workerID := WorkerID(ctx)
+	logLanguage := "unsupported"
+	switch submission.Job.Language {
+	case "c", "cpp", "go", "java", "python":
+		logLanguage = submission.Job.Language
+	}
 	slog.Info("submission processing started",
 		"submission_id", submission.ID,
-		"language", submission.Job.Language,
+		"language", logLanguage,
 		"worker_id", workerID,
 		"attempt", submission.AttemptCount,
 		"status", submission.Status,
@@ -61,7 +66,7 @@ func (s *Service) ProcessSubmission(ctx context.Context, submission Submission) 
 	defer func() {
 		slog.Info("submission processing finished",
 			"submission_id", submission.ID,
-			"language", submission.Job.Language,
+			"language", logLanguage,
 			"worker_id", workerID,
 			"attempt", submission.AttemptCount,
 			"status", submission.Status,
@@ -112,7 +117,7 @@ func (s *Service) ProcessSubmission(ctx context.Context, submission Submission) 
 		submission.FailureMessage = message
 		slog.Error("submission infrastructure failure",
 			"submission_id", submission.ID,
-			"language", submission.Job.Language,
+			"language", logLanguage,
 			"worker_id", workerID,
 			"attempt", submission.AttemptCount,
 			"error", message,
@@ -125,7 +130,7 @@ func (s *Service) ProcessSubmission(ctx context.Context, submission Submission) 
 
 	workspace, err := createWorkspace(submission.Job, spec)
 	if err != nil {
-		return infrastructureFailure("create workspace: " + err.Error())
+		return infrastructureFailure(sanitizedOperationError("create workspace", err).Error())
 	}
 	defer os.RemoveAll(workspace)
 
@@ -136,12 +141,12 @@ func (s *Service) ProcessSubmission(ctx context.Context, submission Submission) 
 		s.metrics.ObserveCompile(compileDuration)
 		slog.Info("submission compile finished",
 			"submission_id", submission.ID,
-			"language", submission.Job.Language,
+			"language", logLanguage,
 			"worker_id", workerID,
 			"duration_ms", compileDuration.Milliseconds(),
 		)
 		if err != nil {
-			return infrastructureFailure("compile execution: " + err.Error())
+			return infrastructureFailure(sanitizedOperationError("compile execution", err).Error())
 		}
 		if ctx.Err() != nil {
 			return infrastructureFailure("compile execution was canceled")
@@ -192,25 +197,25 @@ func (s *Service) ProcessSubmission(ctx context.Context, submission Submission) 
 	s.metrics.ObserveAcquire(acquireDuration)
 	slog.Info("sandbox acquired",
 		"submission_id", submission.ID,
-		"language", submission.Job.Language,
+		"language", logLanguage,
 		"worker_id", workerID,
 		"duration_ms", acquireDuration.Milliseconds(),
 	)
 	if err != nil {
-		return infrastructureFailure("acquire sandbox: " + err.Error())
+		return infrastructureFailure(sanitizedOperationError("acquire sandbox", err).Error())
 	}
 	defer s.pool.Release(sandbox)
 
 	stagingStarted := time.Now()
 	if err := s.executor.PrepareSandbox(ctx, sandbox, workspace); err != nil {
 		s.metrics.ObserveStaging(time.Since(stagingStarted))
-		return infrastructureFailure("prepare sandbox: " + err.Error())
+		return infrastructureFailure(sanitizedOperationError("prepare sandbox", err).Error())
 	}
 	stagingDuration := time.Since(stagingStarted)
 	s.metrics.ObserveStaging(stagingDuration)
 	slog.Info("sandbox staging finished",
 		"submission_id", submission.ID,
-		"language", submission.Job.Language,
+		"language", logLanguage,
 		"worker_id", workerID,
 		"duration_ms", stagingDuration.Milliseconds(),
 	)
@@ -222,16 +227,16 @@ func (s *Service) ProcessSubmission(ctx context.Context, submission Submission) 
 	s.metrics.ObserveRuntime(time.Duration(result.RuntimeMs) * time.Millisecond)
 	slog.Info("submission testcases finished",
 		"submission_id", submission.ID,
-		"language", submission.Job.Language,
+		"language", logLanguage,
 		"worker_id", workerID,
 		"duration_ms", testcaseDuration.Milliseconds(),
 		"runtime_ms", result.RuntimeMs,
 	)
 	if err != nil {
-		return infrastructureFailure("run test cases: " + err.Error())
+		return infrastructureFailure(sanitizedOperationError("run test cases", err).Error())
 	}
 	if result.Status == InfrastructureError {
-		return infrastructureFailure(result.ErrorMessage)
+		return infrastructureFailure("program execution was canceled or unavailable")
 	}
 
 	submission.Status = SubmissionFinished

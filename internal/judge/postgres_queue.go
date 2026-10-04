@@ -114,6 +114,8 @@ func (q *PostgresSubmissionQueue) Dequeue(ctx context.Context) (SubmissionClaim,
 }
 
 func (q *PostgresSubmissionQueue) RenewLease(ctx context.Context, claim SubmissionClaim) error {
+	ctx, cancel := context.WithTimeout(ctx, postgresOperationTimeout)
+	defer cancel()
 	leaseExpiresAt := time.Now().Add(q.leaseDuration)
 	result, err := q.db.ExecContext(
 		ctx,
@@ -143,11 +145,17 @@ func (q *PostgresSubmissionQueue) RenewLease(ctx context.Context, claim Submissi
 }
 
 func (q *PostgresSubmissionQueue) RecoverExpired(ctx context.Context) (int, error) {
+	ctx, cancel := context.WithTimeout(ctx, postgresOperationTimeout)
+	defer cancel()
 	tx, err := q.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if err != nil {
 		return 0, err
 	}
 	defer tx.Rollback()
+	// Recovery can add queued rows, so serialize it with admission counts.
+	if err := lockSubmissionAdmission(ctx, tx); err != nil {
+		return 0, err
+	}
 
 	rows, err := tx.QueryContext(
 		ctx,
@@ -245,6 +253,8 @@ func (q *PostgresSubmissionQueue) Close() {
 }
 
 func (q *PostgresSubmissionQueue) claimNextSubmission(ctx context.Context) (SubmissionClaim, bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, postgresOperationTimeout)
+	defer cancel()
 	tx, err := q.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if err != nil {
 		return SubmissionClaim{}, false, err

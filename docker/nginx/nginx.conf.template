@@ -1,0 +1,119 @@
+worker_processes 1;
+pid /tmp/nginx.pid;
+error_log /dev/stderr warn;
+worker_shutdown_timeout 25s;
+
+events {
+    worker_connections 256;
+    multi_accept off;
+}
+
+http {
+    server_tokens off;
+    # Deliberately omit paths, query strings, auth, identities and request bodies.
+    log_format safe '$status $request_time $upstream_status';
+    access_log /dev/stdout safe;
+    client_body_temp_path /tmp/client_body;
+    proxy_temp_path /tmp/proxy;
+    client_max_body_size 1m;
+    client_body_buffer_size 16k;
+    client_header_buffer_size 1k;
+    large_client_header_buffers 2 8k;
+    client_header_timeout 5s;
+    client_body_timeout 10s;
+    send_timeout 30s;
+    keepalive_timeout 15s;
+    keepalive_requests 100;
+    reset_timedout_connection on;
+
+    limit_conn_zone $binary_remote_addr zone=per_address:1m;
+    limit_conn_zone $server_name zone=per_server:1m;
+    limit_conn per_address 16;
+    limit_conn per_server 64;
+    limit_conn_status 429;
+
+    map $http_host $allowed_host {
+        default 0;
+${NGINX_HOST_MAP}
+    }
+    map $http_origin $browser_origin {
+        default 1;
+        "" 0;
+    }
+
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers ECDHE+AESGCM:ECDHE+CHACHA20;
+    ssl_session_cache shared:TLS:1m;
+    ssl_session_timeout 10m;
+    ssl_session_tickets off;
+    ssl_certificate /run/secrets/tls_certificate;
+    ssl_certificate_key /run/secrets/tls_key;
+
+    add_header Strict-Transport-Security "max-age=31536000" always;
+    add_header X-Content-Type-Options nosniff always;
+    add_header X-Frame-Options DENY always;
+    add_header Content-Security-Policy "default-src 'none'; frame-ancestors 'none'" always;
+    add_header Referrer-Policy no-referrer always;
+    add_header Cache-Control no-store always;
+
+    # Unknown SNI gets no certificate/HTTP response, not a default virtual host.
+    server {
+        listen 8443 ssl default_server;
+        listen 8444 ssl default_server;
+        ssl_reject_handshake on;
+        return 444;
+    }
+
+    # Loopback-only process health, never published; NOT application readiness.
+    server {
+        listen 127.0.0.1:8081;
+        location = /health { access_log off; return 200; }
+        location / { return 404; }
+    }
+
+    server {
+        listen 8443 ssl;
+        server_name ${NGINX_SERVER_NAMES};
+        if ($allowed_host = 0) { return 444; }
+        if ($browser_origin = 1) { return 403; }
+        location = /ready { return 404; }
+        location = /diagnostics { return 404; }
+        location / {
+            proxy_pass http://judge:8080;
+            proxy_http_version 1.1;
+            proxy_set_header Host $http_host;
+            proxy_set_header Connection "";
+            proxy_set_header X-Forwarded-For "";
+            proxy_set_header X-Forwarded-Proto https;
+            proxy_connect_timeout 3s;
+            proxy_send_timeout 10s;
+            proxy_read_timeout 30s;
+            proxy_buffering off;
+            proxy_request_buffering on;
+            proxy_next_upstream off;
+        }
+    }
+
+    # This listener is published only on host 127.0.0.1:9443. Application bearer
+    # auth still enforces admin-only access: network isolation is not auth.
+    server {
+        listen 8444 ssl;
+        server_name ${NGINX_SERVER_NAMES};
+        if ($allowed_host = 0) { return 444; }
+        if ($browser_origin = 1) { return 403; }
+        location ~ ^/(ready|diagnostics)$ {
+            proxy_pass http://judge:8080;
+            proxy_http_version 1.1;
+            proxy_set_header Host $http_host;
+            proxy_set_header Connection "";
+            proxy_set_header X-Forwarded-For "";
+            proxy_set_header X-Forwarded-Proto https;
+            proxy_connect_timeout 3s;
+            proxy_send_timeout 10s;
+            proxy_read_timeout 10s;
+            proxy_buffering off;
+            proxy_next_upstream off;
+        }
+        location / { return 404; }
+    }
+}

@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"yexjudge/internal/judge"
+
+	"github.com/jackc/pgx/v5"
 )
 
 const (
@@ -29,6 +31,13 @@ const (
 )
 
 type config struct {
+	security         securityConfig
+	listenHost       string
+	autoMigrate      bool
+	dbMaxOpenConns   int
+	retentionDays    int
+	databaseConfig   *pgx.ConnConfig
+	executorOptions  judge.DockerExecutorOptions
 	port             string
 	workerCount      int
 	sandboxPoolSize  int
@@ -86,7 +95,45 @@ func loadConfig() (config, error) {
 	cfg.queueRecovery = time.Duration(queueRecoveryMs) * time.Millisecond
 	cfg.queueMaxAttempts = queueMaxAttempts
 	cfg.submitTimeout = time.Duration(submitTimeoutMs) * time.Millisecond
-	return cfg, validateConfig(cfg)
+	if err := validateConfig(cfg); err != nil {
+		return config{}, err
+	}
+	cfg.security, err = loadSecurityConfig(cfg.port)
+	if err != nil {
+		return config{}, err
+	}
+	cfg.listenHost = getEnv("LISTEN_HOST", "127.0.0.1")
+	if cfg.security.insecureLocal && cfg.listenHost != "127.0.0.1" && cfg.listenHost != "::1" {
+		return config{}, fmt.Errorf("insecure local mode must listen on a loopback address")
+	}
+	cfg.databaseURL, err = readConfigSecret("DATABASE_URL", cfg.security.production)
+	if err != nil {
+		return config{}, err
+	}
+	cfg.databaseConfig, err = databaseConnectionConfig(cfg.databaseURL, cfg.security.production)
+	if err != nil {
+		return config{}, err
+	}
+	cfg.autoMigrate, err = getEnvBoolStrict("AUTO_MIGRATE", !cfg.security.production)
+	if err != nil {
+		return config{}, err
+	}
+	if cfg.security.production && cfg.autoMigrate {
+		return config{}, fmt.Errorf("AUTO_MIGRATE is forbidden in production; run cmd/migrate separately")
+	}
+	cfg.dbMaxOpenConns, err = getEnvBoundedInt("DB_MAX_OPEN_CONNS", 16, 128)
+	if err != nil {
+		return config{}, err
+	}
+	cfg.retentionDays, err = getEnvBoundedInt("RETENTION_DAYS", 7, 365)
+	if err != nil {
+		return config{}, err
+	}
+	cfg.executorOptions, err = loadExecutorOptions(cfg.security.production)
+	if err != nil {
+		return config{}, err
+	}
+	return cfg, nil
 }
 
 func getEnv(key, fallback string) string {
@@ -105,13 +152,23 @@ func getEnvIntStrict(key string, fallback int) (int, error) {
 
 	parsed, err := strconv.Atoi(value)
 	if err != nil || parsed <= 0 {
-		return 0, fmt.Errorf("%s must be a positive integer, got %q", key, value)
+		return 0, fmt.Errorf("%s must be a positive integer", key)
 	}
 
 	return parsed, nil
 }
 
 func validateConfig(cfg config) error {
+	port, err := strconv.Atoi(cfg.port)
+	if err != nil || port < 1 || port > 65535 || strconv.Itoa(port) != cfg.port {
+		return fmt.Errorf("PORT must be between 1 and 65535")
+	}
+	if cfg.queueMaxAttempts > 10 {
+		return fmt.Errorf("QUEUE_MAX_ATTEMPTS must not exceed 10")
+	}
+	if cfg.submitTimeout > 15*time.Second || cfg.queueLease > 5*time.Minute || cfg.queuePoll > 30*time.Second || cfg.queueRecovery > 30*time.Second {
+		return fmt.Errorf("submit and queue durations exceed safe limits")
+	}
 	if cfg.workerCount < minWorkerCount || cfg.workerCount > maxWorkerCount {
 		return fmt.Errorf("WORKER_COUNT must be between %d and %d", minWorkerCount, maxWorkerCount)
 	}

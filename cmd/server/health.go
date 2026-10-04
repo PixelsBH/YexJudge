@@ -21,6 +21,10 @@ type ReadinessResponse struct {
 var serverDraining atomic.Bool
 
 func healthHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeAPIError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
+		return
+	}
 	resp := HealthResponse{Status: "ok"}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -30,6 +34,10 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func readinessHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeAPIError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
+		return
+	}
 	checks := make(map[string]string, 3)
 	ready := true
 

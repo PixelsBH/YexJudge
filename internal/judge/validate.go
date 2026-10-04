@@ -11,11 +11,25 @@ import (
 )
 
 const (
-	MaxTimeLimitMs   = 10_000
-	MaxMemoryLimitMb = 512
+	MaxTimeLimitMs           = 10_000
+	MaxMemoryLimitMb         = 512
+	MaxSourceBytes           = 100_000
+	MaxTestCaseBytes         = 100_000
+	MaxJobPayloadBytes       = 10 * 1024 * 1024
+	MaxMetadataStringBytes   = 128
+	MaxClassOperations       = 64
+	MaxClassCallsPerCase     = 1000
+	MaxClassCallsPerJob      = 10_000
+	MaxJSONNesting           = 64
+	MaxJobRequestedRuntimeMs = 120_000
 )
 
 func ValidateJob(job Job) error {
+	// Bound host-side parsing and harness generation before resolving types,
+	// unmarshalling JSON, or constructing generated C++ source.
+	if err := validateJobWork(job); err != nil {
+		return err
+	}
 	if job.Language == "" {
 		return fmt.Errorf("language is required")
 	}
@@ -62,7 +76,7 @@ func ValidateJob(job Job) error {
 		return fmt.Errorf("memoryLimitMb must not exceed %d", MaxMemoryLimitMb)
 	}
 
-	if len(job.SourceCode) > 100_000 {
+	if len(job.SourceCode) > MaxSourceBytes {
 		return fmt.Errorf("sourceCode is too large")
 	}
 
@@ -94,6 +108,190 @@ func ValidateJob(job Job) error {
 	}
 
 	return nil
+}
+
+func validateJobWork(job Job) error {
+	if len(job.SourceCode) > MaxSourceBytes {
+		return fmt.Errorf("sourceCode is too large")
+	}
+	if len(job.TestCases) > 100 {
+		return fmt.Errorf("too many test cases")
+	}
+	if len(job.Language) > MaxMetadataStringBytes || len(job.Mode) > MaxMetadataStringBytes {
+		return fmt.Errorf("execution metadata is too large")
+	}
+	if job.Limits.TimeLimitMs > 0 && job.Limits.TimeLimitMs <= MaxTimeLimitMs &&
+		len(job.TestCases)*job.Limits.TimeLimitMs > MaxJobRequestedRuntimeMs {
+		return fmt.Errorf("total requested testcase runtime must not exceed %d ms", MaxJobRequestedRuntimeMs)
+	}
+	checkString := func(value string) error {
+		if len(value) > MaxMetadataStringBytes {
+			return fmt.Errorf("driver metadata string is too large")
+		}
+		return nil
+	}
+	checkParams := func(params []FunctionParam) error {
+		if len(params) > 10 {
+			return fmt.Errorf("too many driver parameters")
+		}
+		for _, param := range params {
+			if len(param.Name) > MaxMetadataStringBytes || len(param.Type) > MaxMetadataStringBytes {
+				return fmt.Errorf("driver parameter metadata is too large")
+			}
+		}
+		return nil
+	}
+	if job.Function != nil {
+		f := job.Function
+		if err := checkString(f.Name); err != nil {
+			return err
+		}
+		if err := checkString(f.ReturnType); err != nil {
+			return err
+		}
+		if err := checkParams(f.Params); err != nil {
+			return err
+		}
+		if len(f.Observations) > 11 || len(f.Postconditions) > 10 {
+			return fmt.Errorf("too many driver observations or postconditions")
+		}
+		for _, observation := range f.Observations {
+			if err := checkString(observation.Kind); err != nil {
+				return err
+			}
+			if err := checkString(observation.View); err != nil {
+				return err
+			}
+		}
+		for _, postcondition := range f.Postconditions {
+			if err := checkString(postcondition.Kind); err != nil {
+				return err
+			}
+			if err := checkString(postcondition.Subject); err != nil {
+				return err
+			}
+		}
+		if f.Comparison != nil {
+			if err := checkString(f.Comparison.ReturnArrayOrder); err != nil {
+				return err
+			}
+		}
+	}
+	if job.Class != nil {
+		c := job.Class
+		if err := checkString(c.Name); err != nil {
+			return err
+		}
+		if err := checkParams(c.Constructor.Params); err != nil {
+			return err
+		}
+		if len(c.Operations) > MaxClassOperations {
+			return fmt.Errorf("too many class operation declarations")
+		}
+		for _, operation := range c.Operations {
+			if err := checkString(operation.Name); err != nil {
+				return err
+			}
+			if err := checkString(operation.ReturnType); err != nil {
+				return err
+			}
+			if err := checkParams(operation.Params); err != nil {
+				return err
+			}
+		}
+	}
+	total, calls := len(job.SourceCode), 0
+	for i, tc := range job.TestCases {
+		if len(tc.Input) > MaxTestCaseBytes {
+			return fmt.Errorf("test case %d input is too large", i)
+		}
+		if len(tc.ExpectedOutput) > MaxTestCaseBytes || len(tc.ActualOutput) > MaxTestCaseBytes {
+			return fmt.Errorf("test case %d expectedOutput is too large", i)
+		}
+		if len(tc.Args) > 10 || len(tc.ConstructorArgs) > 10 || len(tc.Operations) > MaxClassCallsPerCase {
+			return fmt.Errorf("test case %d contains too many arguments or operations", i)
+		}
+		calls += len(tc.Operations)
+		if calls > MaxClassCallsPerJob {
+			return fmt.Errorf("too many total class operation calls")
+		}
+		structuredSize := 0
+		checkRaw := func(raw json.RawMessage) error {
+			if len(raw) > MaxTestCaseBytes-structuredSize {
+				return fmt.Errorf("test case %d is too large", i)
+			}
+			structuredSize += len(raw)
+			if !jsonNestingBounded(raw) {
+				return fmt.Errorf("test case %d JSON nesting exceeds limit", i)
+			}
+			return nil
+		}
+		if err := checkRaw(tc.Expected); err != nil {
+			return err
+		}
+		for _, arg := range tc.Args {
+			if err := checkRaw(arg); err != nil {
+				return err
+			}
+		}
+		for _, arg := range tc.ConstructorArgs {
+			if err := checkRaw(arg); err != nil {
+				return err
+			}
+		}
+		for _, operation := range tc.Operations {
+			if err := checkString(operation.Name); err != nil {
+				return err
+			}
+			if len(operation.Args) > 10 {
+				return fmt.Errorf("test case %d contains too many operation arguments", i)
+			}
+			structuredSize += len(operation.Name)
+			if structuredSize > MaxTestCaseBytes {
+				return fmt.Errorf("test case %d is too large", i)
+			}
+			for _, arg := range operation.Args {
+				if err := checkRaw(arg); err != nil {
+					return err
+				}
+			}
+		}
+		total += len(tc.Input) + len(tc.ExpectedOutput) + len(tc.ActualOutput) + structuredSize
+		if total > MaxJobPayloadBytes {
+			return fmt.Errorf("total job payload exceeds size limit")
+		}
+	}
+	return nil
+}
+
+// This is only a work bound; semantic JSON validation still happens below.
+func jsonNestingBounded(raw []byte) bool {
+	depth := 0
+	quoted, escaped := false, false
+	for _, b := range raw {
+		if quoted {
+			if escaped {
+				escaped = false
+			} else if b == '\\' {
+				escaped = true
+			} else if b == '"' {
+				quoted = false
+			}
+			continue
+		}
+		switch b {
+		case '"':
+			quoted = true
+		case '[', '{':
+			depth++
+			if depth > MaxJSONNesting {
+				return false
+			}
+		case ']', '}':
+			depth--
+		}
+	}
+	return true
 }
 
 func validateFunctionJob(job Job) error {

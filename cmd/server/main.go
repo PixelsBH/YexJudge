@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -14,13 +13,13 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5/stdlib"
+
 	schema "yexjudge/db"
 	"yexjudge/internal/judge"
 	"yexjudge/internal/judge/languages"
 	"yexjudge/internal/observability"
 	"yexjudge/internal/runner"
-
-	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
 var (
@@ -32,67 +31,29 @@ var (
 
 func createSubmissionHandler(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
-
 	if r.Method != http.MethodPost {
 		writeAPIError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
-
 	job, ok := decodeJudgeJob(w, r)
 	if !ok {
 		return
 	}
-
 	if err := judge.ValidateJob(job); err != nil {
 		writeAPIError(w, http.StatusBadRequest, "validation_error", err.Error())
 		return
 	}
-
-	submission, err := createAndQueueSubmission(job)
+	submission, err := createAndQueueSubmission(r, job)
 	if err != nil {
-		writeAPIError(w, http.StatusInternalServerError, "internal_error", "internal error")
-		log.Println("failed to create submission:", err)
+		writeAdmissionError(w, err)
 		return
 	}
-
-	response := judge.SubmissionAcceptedResponse{
-		SubmissionID: submission.ID,
-		Status:       submission.Status,
-	}
-
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Location", "/submissions/"+submission.ID)
 	w.WriteHeader(http.StatusAccepted)
-	if err := json.NewEncoder(w).Encode(response); err != nil {
-		log.Println("failed to encode submission response:", err)
+	if err := json.NewEncoder(w).Encode(judge.SubmissionAcceptedResponse{SubmissionID: submission.ID, Status: submission.Status}); err != nil {
+		slog.Warn("submission response write failed")
 	}
-}
-
-func createAndQueueSubmission(job judge.Job) (judge.Submission, error) {
-	submission := judge.Submission{
-		ID:     fmt.Sprintf("%d", time.Now().UnixNano()),
-		Job:    job,
-		Status: judge.SubmissionQueued,
-	}
-
-	if err := submissionStore.Save(submission); err != nil {
-		return judge.Submission{}, err
-	}
-
-	if err := submissionQueue.Enqueue(submission.ID); err != nil {
-		submission.Status = judge.SubmissionFailed
-		if updateErr := submissionStore.Update(submission); updateErr != nil {
-			return judge.Submission{}, fmt.Errorf("enqueue failed: %v; failed to update submission: %w", err, updateErr)
-		}
-		return judge.Submission{}, err
-	}
-	slog.Info("submission queued",
-		"submission_id", submission.ID,
-		"language", job.Language,
-		"status", submission.Status,
-	)
-
-	return submission, nil
 }
 
 func submissionsCollectionHandler(w http.ResponseWriter, r *http.Request) {
@@ -100,7 +61,6 @@ func submissionsCollectionHandler(w http.ResponseWriter, r *http.Request) {
 		createSubmissionHandler(w, r)
 		return
 	}
-
 	writeAPIError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 }
 
@@ -109,50 +69,38 @@ func startWorker(ctx context.Context, workerID int, workers *sync.WaitGroup) {
 	go func() {
 		defer workers.Done()
 		for {
-			select {
-			case <-ctx.Done():
+			if ctx.Err() != nil {
 				return
-			default:
 			}
-
 			claim, err := submissionQueue.Dequeue(ctx)
 			if err != nil {
 				if ctx.Err() != nil {
 					return
 				}
-				log.Println("worker", workerID, "failed to dequeue submission:", err)
+				slog.Error("worker dequeue failed", "worker_id", workerID, "category", "persistence")
 				continue
 			}
-
 			submission, ok := submissionStore.Get(claim.ID)
 			if !ok {
-				log.Println("worker", workerID, "submission not found in store:", claim.ID)
+				slog.Warn("claimed submission unavailable", "submission_id", claim.ID, "worker_id", workerID)
 				continue
 			}
 			if submission.AttemptCount != claim.Attempt {
-				log.Println("worker", workerID, "submission claim attempt mismatch:", claim.ID, claim.Attempt, submission.AttemptCount)
+				slog.Warn("submission claim attempt mismatch", "submission_id", claim.ID, "worker_id", workerID)
 				continue
 			}
 			if submission.Status != judge.SubmissionQueued && submission.Status != judge.SubmissionRunning {
 				slog.Warn("worker skipped submission", "submission_id", claim.ID, "worker_id", workerID, "status", submission.Status)
 				continue
 			}
-			if runtimeMetrics != nil && submission.CreatedAt != nil {
-				runtimeMetrics.ObserveQueueWait(time.Since(*submission.CreatedAt))
-			}
 			queueWaitMs := int64(0)
 			if submission.CreatedAt != nil {
 				queueWaitMs = time.Since(*submission.CreatedAt).Milliseconds()
+				if runtimeMetrics != nil {
+					runtimeMetrics.ObserveQueueWait(time.Since(*submission.CreatedAt))
+				}
 			}
-			slog.Info("submission claimed",
-				"submission_id", claim.ID,
-				"language", submission.Job.Language,
-				"worker_id", workerID,
-				"attempt", claim.Attempt,
-				"from_status", submission.Status,
-				"to_status", judge.SubmissionRunning,
-				"queue_wait_ms", queueWaitMs,
-			)
+			slog.Info("submission claimed", "submission_id", claim.ID, "language", submission.Job.Language, "worker_id", workerID, "attempt", claim.Attempt, "from_status", submission.Status, "to_status", judge.SubmissionRunning, "queue_wait_ms", queueWaitMs)
 			processCtx, cancelProcess := context.WithCancel(judge.WithWorkerID(ctx, workerID))
 			leaseCtx, cancelLease := context.WithCancel(ctx)
 			leaseDone := make(chan struct{})
@@ -162,7 +110,7 @@ func startWorker(ctx context.Context, workerID int, workers *sync.WaitGroup) {
 				runtimeMetrics.WorkerStarted()
 			}
 			if _, err := judgeService.ProcessSubmission(processCtx, submission); err != nil {
-				slog.Error("worker failed to process submission", "submission_id", claim.ID, "worker_id", workerID, "error", err)
+				slog.Error("worker processing failed", "submission_id", claim.ID, "worker_id", workerID, "category", "processing_or_persistence")
 			}
 			if runtimeMetrics != nil {
 				runtimeMetrics.WorkerFinished()
@@ -171,8 +119,8 @@ func startWorker(ctx context.Context, workerID int, workers *sync.WaitGroup) {
 			cancelLease()
 			<-leaseDone
 			select {
-			case err := <-leaseLost:
-				slog.Warn("submission processing stopped after lease loss", "submission_id", claim.ID, "worker_id", workerID, "error", err)
+			case <-leaseLost:
+				slog.Warn("submission stopped after lease loss", "submission_id", claim.ID, "worker_id", workerID)
 			default:
 			}
 		}
@@ -187,14 +135,13 @@ func renewSubmissionLease(ctx context.Context, claim judge.SubmissionClaim, done
 	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
-
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
 			if err := submissionQueue.RenewLease(ctx, claim); err != nil {
-				slog.Error("failed to renew submission lease", "submission_id", claim.ID, "attempt", claim.Attempt, "error", err)
+				slog.Error("submission lease renewal failed", "submission_id", claim.ID, "attempt", claim.Attempt, "category", "persistence_or_lease")
 				select {
 				case leaseLost <- err:
 				default:
@@ -218,11 +165,12 @@ func startLeaseRecovery(ctx context.Context, interval time.Duration) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				recovered, err := submissionQueue.RecoverExpired(ctx)
-				if err != nil {
-					slog.Error("failed to recover expired submissions", "error", err)
+				if recovered, err := submissionQueue.RecoverExpired(ctx); err != nil {
+					if ctx.Err() == nil {
+						slog.Error("expired submission recovery failed", "category", "persistence")
+					}
 				} else if recovered > 0 {
-					slog.Info("recovered expired submissions", "count", recovered)
+					slog.Info("expired submissions recovered", "count", recovered)
 				}
 			}
 		}
@@ -234,14 +182,11 @@ func buildSandboxPool(executor judge.Executor, size int) ([]*judge.Sandbox, erro
 	for i := 0; i < size; i++ {
 		sandbox, err := executor.StartSandbox(context.Background())
 		if err != nil {
-			for _, started := range sandboxes {
-				executor.RemoveSandbox(started)
-			}
+			cleanupSandboxes(executor, sandboxes)
 			return nil, err
 		}
 		sandboxes = append(sandboxes, sandbox)
 	}
-
 	return sandboxes, nil
 }
 
@@ -251,68 +196,7 @@ func cleanupSandboxes(executor judge.Executor, sandboxes []*judge.Sandbox) {
 	}
 }
 
-func main() {
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
-	if err := loadEnvFile(".env"); err != nil {
-		log.Fatal("failed to load .env:", err)
-	}
-	cfg, err := loadConfig()
-	if err != nil {
-		log.Fatal("invalid configuration:", err)
-	}
-	submitTimeout = cfg.submitTimeout
-	runtimeWorkerCapacity = cfg.workerCount
-	runtimeCompileSlots = cfg.compileSlots
-	cmdRunner := &runner.DockerRunner{}
-	registry := languages.NewRegistry(
-		languages.Cpp{},
-		languages.C{},
-		languages.Python{},
-		languages.Go{},
-		languages.Java{},
-	)
-
-	executor := judge.NewDockerExecutor(cmdRunner)
-
-	sandboxes, err := buildSandboxPool(executor, cfg.sandboxPoolSize)
-	if err != nil {
-		log.Fatal("failed to build sandbox pool:", err)
-	}
-	runtimeMetrics = observability.NewMetrics()
-	runtimePool = judge.NewExecutorSandboxPoolWithMetrics(executor, sandboxes, runtimeMetrics)
-	defer runtimePool.Close()
-	pool := runtimePool
-
-	store, queue, cleanup, err := buildPersistence(cfg)
-	if err != nil {
-		runtimePool.Close()
-		log.Fatal("failed to build persistence:", err)
-	}
-	defer cleanup()
-
-	submissionStore = store
-	submissionQueue = queue
-
-	judgeService = judge.NewServiceWithMetricsAndCompileSlots(executor, pool, store, registry, runtimeMetrics, cfg.compileSlots)
-	defer judgeService.Close()
-
-	workerCtx, cancelWorkers := context.WithCancel(context.Background())
-	defer cancelWorkers()
-	var workers sync.WaitGroup
-	if recovered, err := submissionQueue.RecoverExpired(context.Background()); err != nil {
-		cleanup()
-		judgeService.Close()
-		runtimePool.Close()
-		log.Fatal("failed to recover expired submissions:", err)
-	} else if recovered > 0 {
-		log.Println("recovered expired submissions at startup:", recovered)
-	}
-	startLeaseRecovery(workerCtx, cfg.queueRecovery)
-
-	for i := 1; i <= cfg.workerCount; i++ {
-		startWorker(workerCtx, i, &workers)
-	}
-
+func serviceMux() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", healthHandler)
 	mux.HandleFunc("/ready", readinessHandler)
@@ -321,99 +205,149 @@ func main() {
 	mux.HandleFunc("/submissions", submissionsCollectionHandler)
 	mux.HandleFunc("/submissions/", submissionHandler)
 	mux.HandleFunc("/submit", submitHandler)
+	return mux
+}
 
-	server := &http.Server{
-		Addr:    ":" + cfg.port,
-		Handler: requestIDMiddleware(mux),
+func main() {
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
+	if os.Getenv("APP_ENV") != "production" {
+		if err := loadEnvFile(".env"); err != nil {
+			log.Fatal("failed to load local environment file")
+		}
 	}
+	cfg, err := loadConfig()
+	if err != nil {
+		log.Fatal("invalid configuration: ", err)
+	}
+	submitTimeout = cfg.submitTimeout
+	runtimeWorkerCapacity = cfg.workerCount
+	runtimeCompileSlots = cfg.compileSlots
+	runtimeSecurity = newAPISecurity(cfg.security)
+	if cfg.security.insecureLocal {
+		slog.Warn("unauthenticated development mode enabled; loopback access only")
+	}
+
+	// Refuse an invalid/outdated production schema before creating containers.
+	store, queue, cleanup, err := buildPersistence(cfg)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer cleanup()
+	submissionStore, submissionQueue = store, queue
+	executor, err := judge.NewDockerExecutorWithOptions(&runner.DockerRunner{}, cfg.executorOptions)
+	if err != nil {
+		cleanup()
+		log.Fatal("invalid execution configuration")
+	}
+	sandboxes, err := buildSandboxPool(executor, cfg.sandboxPoolSize)
+	if err != nil {
+		cleanup()
+		log.Fatal("runtime sandbox initialization failed; check reviewed images, cgroups, and Docker permissions")
+	}
+	runtimeMetrics = observability.NewMetrics()
+	runtimePool = judge.NewExecutorSandboxPoolWithMetrics(executor, sandboxes, runtimeMetrics)
+	defer runtimePool.Close()
+	registry := languages.NewRegistry(languages.Cpp{}, languages.C{}, languages.Python{}, languages.Go{}, languages.Java{})
+	judgeService = judge.NewServiceWithMetricsAndCompileSlots(executor, runtimePool, store, registry, runtimeMetrics, cfg.compileSlots)
+	defer judgeService.Close()
+
+	workerCtx, cancelWorkers := context.WithCancel(context.Background())
+	defer cancelWorkers()
+	var workers sync.WaitGroup
+	if recovered, err := submissionQueue.RecoverExpired(workerCtx); err != nil {
+		judgeService.Close()
+		runtimePool.Close()
+		cleanup()
+		log.Fatal("startup lease recovery failed")
+	} else if recovered > 0 {
+		slog.Info("expired submissions recovered at startup", "count", recovered)
+	}
+	startLeaseRecovery(workerCtx, cfg.queueRecovery)
+	startRetention(workerCtx, cfg.retentionDays)
+	for i := 1; i <= cfg.workerCount; i++ {
+		startWorker(workerCtx, i, &workers)
+	}
+	server := newHTTPServer(cfg, requestIDMiddleware(runtimeSecurity.middleware(serviceMux())))
 
 	shutdownDone := make(chan struct{})
 	go func() {
 		sigCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 		defer stop()
-
 		<-sigCtx.Done()
-		log.Println("shutdown signal received")
+		slog.Info("shutdown signal received")
 		serverDraining.Store(true)
-
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
-
 		if err := server.Shutdown(shutdownCtx); err != nil {
-			log.Println("server shutdown error:", err)
+			slog.Warn("HTTP shutdown deadline reached")
 		}
-
 		cancelWorkers()
 		submissionQueue.Close()
 		workersDone := make(chan struct{})
-		go func() {
-			workers.Wait()
-			close(workersDone)
-		}()
+		go func() { workers.Wait(); close(workersDone) }()
 		select {
 		case <-workersDone:
-			log.Println("workers stopped")
+			slog.Info("workers stopped")
 		case <-shutdownCtx.Done():
-			log.Println("worker shutdown deadline reached; removing runtime sandboxes")
+			slog.Warn("worker shutdown deadline reached; removing runtime sandboxes")
 		}
 		judgeService.Close()
 		runtimePool.Close()
-
 		close(shutdownDone)
 	}()
-
-	slog.Info("server started",
-		"address", ":"+cfg.port,
-		"workers", cfg.workerCount,
-		"sandbox_pool_size", cfg.sandboxPoolSize,
-		"compile_slots", cfg.compileSlots,
-	)
-
-	err = server.ListenAndServe()
-	if err != nil && err != http.ErrServerClosed {
-		log.Fatal(err)
+	slog.Info("server started", "address", server.Addr, "workers", cfg.workerCount, "sandbox_pool_size", cfg.sandboxPoolSize, "compile_slots", cfg.compileSlots, "authenticated", !cfg.security.insecureLocal, "accepting_submissions", cfg.security.acceptSubmissions)
+	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		cancelWorkers()
+		submissionQueue.Close()
+		judgeService.Close()
+		runtimePool.Close()
+		cleanup()
+		log.Fatal("HTTP listener failed")
 	}
-
 	<-shutdownDone
 }
 
 func buildPersistence(cfg config) (judge.SubmissionStore, judge.SubmissionQueue, func(), error) {
-	if cfg.databaseURL == "" {
-		return nil, nil, nil, fmt.Errorf("DATABASE_URL is required")
-	}
-
-	sqlDB, err := sql.Open("pgx", cfg.databaseURL)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-
-	if err := sqlDB.Ping(); err != nil {
-		sqlDB.Close()
-		return nil, nil, nil, err
-	}
-	migrationCtx, cancelMigration := context.WithTimeout(context.Background(), 10*time.Second)
-	if err := schema.Apply(migrationCtx, sqlDB); err != nil {
-		cancelMigration()
-		sqlDB.Close()
-		return nil, nil, nil, err
-	}
-	cancelMigration()
-
-	log.Println("using Postgres store and queue")
-
-	store := judge.NewPostgresSubmissionStore(sqlDB)
-	queue := judge.NewPostgresSubmissionQueueWithOptions(
-		sqlDB,
-		cfg.queuePoll,
-		cfg.queueLease,
-		cfg.queueMaxAttempts,
-	)
-
-	cleanup := func() {
-		if err := sqlDB.Close(); err != nil {
-			log.Println("failed to close database:", err)
+	connectionConfig := cfg.databaseConfig
+	if connectionConfig == nil {
+		var err error
+		connectionConfig, err = databaseConnectionConfig(cfg.databaseURL, cfg.security.production)
+		if err != nil {
+			return nil, nil, nil, err
 		}
 	}
-
+	sqlDB := stdlib.OpenDB(*connectionConfig)
+	maxConnections := cfg.dbMaxOpenConns
+	if maxConnections <= 0 {
+		maxConnections = 16
+	}
+	sqlDB.SetMaxOpenConns(maxConnections)
+	sqlDB.SetMaxIdleConns(maxConnections / 2)
+	sqlDB.SetConnMaxLifetime(30 * time.Minute)
+	sqlDB.SetConnMaxIdleTime(5 * time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := sqlDB.PingContext(ctx); err != nil {
+		sqlDB.Close()
+		return nil, nil, nil, fmt.Errorf("database connection failed")
+	}
+	var schemaErr error
+	if cfg.autoMigrate && !cfg.security.production {
+		schemaErr = schema.Apply(ctx, sqlDB)
+	} else {
+		schemaErr = schema.Check(ctx, sqlDB)
+	}
+	if schemaErr != nil {
+		sqlDB.Close()
+		return nil, nil, nil, fmt.Errorf("database schema unavailable or outdated; review and run cmd/migrate with separate migration credentials")
+	}
+	slog.Info("PostgreSQL persistence initialized", "automatic_migrations", cfg.autoMigrate)
+	store := judge.NewPostgresSubmissionStore(sqlDB)
+	queue := judge.NewPostgresSubmissionQueueWithOptions(sqlDB, cfg.queuePoll, cfg.queueLease, cfg.queueMaxAttempts)
+	cleanup := func() {
+		if err := sqlDB.Close(); err != nil {
+			slog.Warn("database close failed")
+		}
+	}
 	return store, queue, cleanup, nil
 }

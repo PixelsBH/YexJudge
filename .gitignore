@@ -1,4 +1,14 @@
 .env
 .env.*
 !.env.example
+!.env.production.example
 .yexjudge-workspaces/
+
+# Deployment files belong in a protected host secret store, never in Git.
+.production/
+secrets/
+*.key
+*.pem
+*.p12
+*.pfx
+scripts/__pycache__/

@@ -269,6 +269,66 @@ func TestValidateJobRejectsLimitsAndOversizedPayloads(t *testing.T) {
 	}
 }
 
+func TestValidateJobBoundsWorkBeforeMetadataParsing(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(*Job)
+		want   string
+	}{
+		{"large function expected", func(j *Job) { j.TestCases[0].Expected = json.RawMessage(strings.Repeat("x", MaxTestCaseBytes+1)) }, "too large"},
+		{"large function argument", func(j *Job) {
+			j.TestCases[0].Args = []json.RawMessage{json.RawMessage(strings.Repeat("x", MaxTestCaseBytes+1))}
+		}, "too large"},
+		{"deep JSON", func(j *Job) {
+			j.TestCases[0].Expected = json.RawMessage(strings.Repeat("[", MaxJSONNesting+1) + "0" + strings.Repeat("]", MaxJSONNesting+1))
+		}, "nesting"},
+		{"huge type", func(j *Job) { j.Function.ReturnType = strings.Repeat("vector<", 1000) }, "metadata"},
+		{"huge observations", func(j *Job) { j.Function.Observations = make([]ObservationSpec, 12) }, "observations"},
+		{"huge class declarations", func(j *Job) {
+			j.Function = nil
+			j.Class = &ClassSpec{Operations: make([]ClassOperationSpec, MaxClassOperations+1)}
+		}, "operation declarations"},
+		{"huge class calls", func(j *Job) {
+			j.Function = nil
+			j.Class = &ClassSpec{}
+			j.TestCases[0].Operations = make([]OperationCall, MaxClassCallsPerCase+1)
+		}, "too many"},
+		{"large constructor argument", func(j *Job) {
+			j.Function = nil
+			j.Class = &ClassSpec{}
+			j.TestCases[0].ConstructorArgs = []json.RawMessage{json.RawMessage(strings.Repeat("x", MaxTestCaseBytes+1))}
+		}, "too large"},
+		{"large operation argument", func(j *Job) {
+			j.Function = nil
+			j.Class = &ClassSpec{}
+			j.TestCases[0].Operations = []OperationCall{{Args: []json.RawMessage{json.RawMessage(strings.Repeat("x", MaxTestCaseBytes+1))}}}
+		}, "too large"},
+		{"aggregate runtime", func(j *Job) {
+			j.Limits.TimeLimitMs = MaxTimeLimitMs
+			j.TestCases = make([]TestCase, MaxJobRequestedRuntimeMs/MaxTimeLimitMs+1)
+		}, "total requested"},
+		{"aggregate bytes", func(j *Job) {
+			j.Function = nil
+			j.TestCases = make([]TestCase, 100)
+			for i := range j.TestCases {
+				j.TestCases[i] = TestCase{Input: strings.Repeat("x", MaxTestCaseBytes), ExpectedOutput: strings.Repeat("y", MaxTestCaseBytes)}
+			}
+		}, "total job payload"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			job := validFunctionJob()
+			tc.mutate(&job)
+			if err := ValidateJob(job); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %v, want %s", err, tc.want)
+			}
+		})
+	}
+	if !jsonNestingBounded([]byte(`"[[[\\\"{{{"`)) {
+		t.Fatal("JSON string incorrectly counted as nesting")
+	}
+}
+
 func TestValidateJobAcceptsGenericClassMode(t *testing.T) {
 	job := Job{
 		Language:   "cpp",

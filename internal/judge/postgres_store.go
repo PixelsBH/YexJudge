@@ -32,6 +32,23 @@ func NewPostgresSubmissionStore(db *sql.DB) *PostgresSubmissionStore {
 }
 
 func (s *PostgresSubmissionStore) Save(sub Submission) error {
+	ctx, cancel := context.WithTimeout(context.Background(), postgresOperationTimeout)
+	defer cancel()
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := lockSubmissionAdmission(ctx, tx); err != nil {
+		return err
+	}
+	if err := insertSubmission(ctx, tx, sub); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func insertSubmission(ctx context.Context, tx *sql.Tx, sub Submission) error {
 	jobJSON, err := json.Marshal(sub.Job)
 	if err != nil {
 		return err
@@ -42,10 +59,12 @@ func (s *PostgresSubmissionStore) Save(sub Submission) error {
 		return err
 	}
 
-	_, err = s.db.Exec(
+	_, err = tx.ExecContext(
+		ctx,
 		`INSERT INTO submissions
-		 (id, status, job, result, started_at, attempt_count, lease_expires_at, failure_message)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+		 (id, status, job, result, started_at, attempt_count, lease_expires_at, failure_message,
+		  owner_service, owner_user)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULLIF($9, ''), NULLIF($10, ''))`,
 		sub.ID,
 		sub.Status,
 		jobJSON,
@@ -54,23 +73,30 @@ func (s *PostgresSubmissionStore) Save(sub Submission) error {
 		sub.AttemptCount,
 		sub.LeaseExpiresAt,
 		sub.FailureMessage,
+		sub.OwnerService,
+		sub.OwnerUser,
 	)
 	return err
 }
 
 func (s *PostgresSubmissionStore) Ready(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, postgresOperationTimeout)
+	defer cancel()
 	return s.db.PingContext(ctx)
 }
 
-func (s *PostgresSubmissionStore) Get(id string) (Submission, bool) {
-	row := s.db.QueryRow(
-		`SELECT id, status, job, result, created_at, started_at, attempt_count,
-		        lease_expires_at, failure_message
-		 FROM submissions
-		 WHERE id = $1`,
-		id,
-	)
+const submissionColumns = `id, status, job, result, created_at, started_at, attempt_count,
+	lease_expires_at, failure_message, owner_service, owner_user`
 
+func (s *PostgresSubmissionStore) Get(id string) (Submission, bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), postgresOperationTimeout)
+	defer cancel()
+	sub, found, err := scanSubmission(s.db.QueryRowContext(ctx,
+		`SELECT `+submissionColumns+` FROM submissions WHERE id = $1`, id))
+	return sub, found && err == nil
+}
+
+func scanSubmission(row *sql.Row) (Submission, bool, error) {
 	var sub Submission
 	var jobJSON []byte
 	var resultJSON sql.NullString
@@ -78,6 +104,7 @@ func (s *PostgresSubmissionStore) Get(id string) (Submission, bool) {
 	var startedAt sql.NullTime
 	var leaseExpiresAt sql.NullTime
 	var failureMessage sql.NullString
+	var ownerService, ownerUser sql.NullString
 
 	err := row.Scan(
 		&sub.ID,
@@ -89,22 +116,24 @@ func (s *PostgresSubmissionStore) Get(id string) (Submission, bool) {
 		&sub.AttemptCount,
 		&leaseExpiresAt,
 		&failureMessage,
+		&ownerService,
+		&ownerUser,
 	)
 	if err == sql.ErrNoRows {
-		return Submission{}, false
+		return Submission{}, false, nil
 	}
 	if err != nil {
-		return Submission{}, false
+		return Submission{}, false, err
 	}
 
 	if err := json.Unmarshal(jobJSON, &sub.Job); err != nil {
-		return Submission{}, false
+		return Submission{}, false, err
 	}
 
 	if resultJSON.Valid {
 		var result Result
 		if err := json.Unmarshal([]byte(resultJSON.String), &result); err != nil {
-			return Submission{}, false
+			return Submission{}, false, err
 		}
 		sub.Result = &result
 	}
@@ -121,10 +150,14 @@ func (s *PostgresSubmissionStore) Get(id string) (Submission, bool) {
 		sub.FailureMessage = failureMessage.String
 	}
 
-	return sub, true
+	sub.OwnerService = ownerService.String
+	sub.OwnerUser = ownerUser.String
+	return sub, true, nil
 }
 
 func (s *PostgresSubmissionStore) Update(sub Submission) error {
+	ctx, cancel := context.WithTimeout(context.Background(), postgresOperationTimeout)
+	defer cancel()
 	resultJSON, err := marshalResult(sub.Result)
 	if err != nil {
 		return err
@@ -135,7 +168,8 @@ func (s *PostgresSubmissionStore) Update(sub Submission) error {
 		leaseExpiresAt = nil
 	}
 
-	result, err := s.db.Exec(
+	result, err := s.db.ExecContext(
+		ctx,
 		`UPDATE submissions
 		 SET status = $2,
 		     result = $3,
@@ -171,8 +205,11 @@ func (s *PostgresSubmissionStore) Update(sub Submission) error {
 }
 
 func (s *PostgresSubmissionStore) Counts() (SubmissionCounts, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), postgresOperationTimeout)
+	defer cancel()
 	var counts SubmissionCounts
-	err := s.db.QueryRow(
+	err := s.db.QueryRowContext(
+		ctx,
 		`SELECT
 			COUNT(*) FILTER (WHERE status = $1),
 			COUNT(*) FILTER (WHERE status = $2),

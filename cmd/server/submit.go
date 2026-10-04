@@ -30,10 +30,9 @@ func submitHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	submission, err := createAndQueueSubmission(job)
+	submission, err := createAndQueueSubmission(r, job)
 	if err != nil {
-		writeAPIError(w, http.StatusInternalServerError, "internal_error", "internal error")
-		log.Println("failed to create submission:", err)
+		writeAdmissionError(w, err)
 		return
 	}
 
@@ -50,7 +49,7 @@ func submitHandler(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, judge.SubmissionResponse{
 		ID:     result.ID,
 		Status: result.Status,
-		Result: result.Result,
+		Result: responseResult(r.Context(), result.Result),
 	})
 }
 
@@ -62,7 +61,10 @@ func waitForSubmission(ctx context.Context, id string, timeout time.Duration) (j
 	defer ticker.Stop()
 
 	for {
-		submission, ok := submissionStore.Get(id)
+		submission, ok, err := ownedSubmission(ctx, id)
+		if err != nil {
+			return judge.Submission{ID: id, Status: judge.SubmissionQueued}, false
+		}
 		if ok && (submission.Status == judge.SubmissionFinished || submission.Status == judge.SubmissionFailed) {
 			return submission, true
 		}
@@ -71,7 +73,7 @@ func waitForSubmission(ctx context.Context, id string, timeout time.Duration) (j
 		case <-ctx.Done():
 			return submission, false
 		case <-deadline.C:
-			if latest, ok := submissionStore.Get(id); ok {
+			if latest, ok, err := ownedSubmission(ctx, id); err == nil && ok {
 				return latest, false
 			}
 			return submission, false

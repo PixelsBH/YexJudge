@@ -116,6 +116,8 @@ type Result struct {
 }
 
 type Submission struct {
+	OwnerService   string           `json:"-"`
+	OwnerUser      string           `json:"-"`
 	CreatedAt      *time.Time       `json:"createdAt,omitempty"`
 	ID             string           `json:"id"`
 	Job            Job              `json:"job"`

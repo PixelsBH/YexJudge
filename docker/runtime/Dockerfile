@@ -1,4 +1,6 @@
-FROM debian:bookworm-slim
+# Tag default is for development; release builds must supply a reviewed digest.
+ARG RUNTIME_BASE_IMAGE=debian:bookworm-slim
+FROM ${RUNTIME_BASE_IMAGE}
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
