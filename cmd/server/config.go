@@ -18,7 +18,10 @@ const (
 	defaultQueueLeaseMs     = 60000
 	defaultQueueRecoveryMs  = 1000
 	defaultQueueMaxAttempts = 3
+	defaultMaxQueued        = 100
+	maxMaxQueued            = 100000
 	defaultSubmitTimeoutMs  = 10000
+	maxSubmitTimeoutMs      = 60000
 	minWorkerCount          = 1
 	maxWorkerCount          = 64
 	minSandboxPoolSize      = 1
@@ -38,6 +41,7 @@ type config struct {
 	queueLease       time.Duration
 	queueRecovery    time.Duration
 	queueMaxAttempts int
+	maxQueued        int
 	submitTimeout    time.Duration
 }
 
@@ -77,6 +81,10 @@ func loadConfig() (config, error) {
 	if err != nil {
 		return config{}, err
 	}
+	maxQueued, err := getEnvIntStrict("MAX_QUEUED", defaultMaxQueued)
+	if err != nil {
+		return config{}, err
+	}
 	submitTimeoutMs, err := getEnvIntStrict("SUBMIT_TIMEOUT_MS", defaultSubmitTimeoutMs)
 	if err != nil {
 		return config{}, err
@@ -85,6 +93,7 @@ func loadConfig() (config, error) {
 	cfg.queueLease = time.Duration(queueLeaseMs) * time.Millisecond
 	cfg.queueRecovery = time.Duration(queueRecoveryMs) * time.Millisecond
 	cfg.queueMaxAttempts = queueMaxAttempts
+	cfg.maxQueued = maxQueued
 	cfg.submitTimeout = time.Duration(submitTimeoutMs) * time.Millisecond
 	return cfg, validateConfig(cfg)
 }
@@ -123,6 +132,12 @@ func validateConfig(cfg config) error {
 	}
 	if cfg.queueMaxAttempts < 1 {
 		return fmt.Errorf("QUEUE_MAX_ATTEMPTS must be at least 1")
+	}
+	if cfg.maxQueued < 1 || cfg.maxQueued > maxMaxQueued {
+		return fmt.Errorf("MAX_QUEUED must be between 1 and %d", maxMaxQueued)
+	}
+	if cfg.submitTimeout > time.Duration(maxSubmitTimeoutMs)*time.Millisecond {
+		return fmt.Errorf("SUBMIT_TIMEOUT_MS must not exceed %d", maxSubmitTimeoutMs)
 	}
 	if cfg.queueLease <= 0 || cfg.queuePoll <= 0 || cfg.queueRecovery <= 0 || cfg.submitTimeout <= 0 {
 		return fmt.Errorf("queue and submit durations must be positive")

@@ -16,10 +16,17 @@ import (
 )
 
 type testcaseExecutor struct {
-	compileResult *runner.RunResult
-	prepareErr    error
-	runs          []*runner.RunResult
-	runIndex      int
+	compileResult     *runner.RunResult
+	prepareErr        error
+	resetErr          error
+	prepareCalls      int
+	resetCalls        int
+	prepareContextErr error
+	resetContextErr   error
+	cleanupDelay      time.Duration
+	waitRunContext    bool
+	runs              []*runner.RunResult
+	runIndex          int
 }
 
 func (e *testcaseExecutor) Compile(context.Context, string, languages.Spec, Limits) (*runner.RunResult, error) {
@@ -34,19 +41,32 @@ func (e *testcaseExecutor) StartSandbox(context.Context) (*Sandbox, error) {
 func (e *testcaseExecutor) ConfigureSandbox(context.Context, *Sandbox, Limits) error {
 	return nil
 }
-func (e *testcaseExecutor) PrepareSandbox(context.Context, *Sandbox, string) error {
+func (e *testcaseExecutor) PrepareSandbox(ctx context.Context, _ *Sandbox, _ string) error {
+	e.prepareCalls++
+	e.prepareContextErr = ctx.Err()
+	if e.cleanupDelay > 0 {
+		time.Sleep(e.cleanupDelay)
+	}
 	return e.prepareErr
 }
-func (e *testcaseExecutor) ResetSandbox(context.Context, *Sandbox) error {
-	return nil
+func (e *testcaseExecutor) ResetSandbox(ctx context.Context, _ *Sandbox) error {
+	e.resetCalls++
+	e.resetContextErr = ctx.Err()
+	if e.cleanupDelay > 0 {
+		time.Sleep(e.cleanupDelay)
+	}
+	return e.resetErr
 }
 func (e *testcaseExecutor) RemoveSandbox(*Sandbox) {}
-func (e *testcaseExecutor) RunTestCase(context.Context, *Sandbox, string, languages.Spec) (*runner.RunResult, error) {
+func (e *testcaseExecutor) RunTestCase(ctx context.Context, _ *Sandbox, _ string, _ languages.Spec) (*runner.RunResult, error) {
 	if e.runIndex >= len(e.runs) {
 		return nil, errors.New("unexpected testcase execution")
 	}
 	result := e.runs[e.runIndex]
 	e.runIndex++
+	if e.waitRunContext {
+		<-ctx.Done()
+	}
 	return result, nil
 }
 
@@ -152,12 +172,16 @@ func TestRunTestCasesMapsVerdicts(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			job := testCaseJob("expected")
 			executor := &testcaseExecutor{runs: []*runner.RunResult{tt.run}}
-			result, err := runTestCases(context.Background(), executor, &Sandbox{ContainerName: "test"}, job, languages.Python{})
+			sandbox := &Sandbox{ContainerName: "test"}
+			result, err := runTestCases(context.Background(), executor, sandbox, "", job, languages.Python{})
 			if err != nil {
 				t.Fatalf("runTestCases() error = %v", err)
 			}
 			if result.Status != tt.wantStatus {
 				t.Fatalf("status = %q, want %q", result.Status, tt.wantStatus)
+			}
+			if executor.resetCalls != 1 || executor.prepareCalls != 1 || !sandbox.restarted {
+				t.Fatalf("cleanup calls = reset:%d prepare:%d restarted:%t, want one clean restage", executor.resetCalls, executor.prepareCalls, sandbox.restarted)
 			}
 			if tt.wantStatus == Accepted {
 				if result.RuntimeMs != tt.wantRuntimeMs {
@@ -254,7 +278,7 @@ func TestRunTestCasesAppliesUnorderedArrayComparisonOptIn(t *testing.T) {
 				Limits:    Limits{TimeLimitMs: 1000, MemoryLimitMb: 128},
 			}
 			executor := &testcaseExecutor{runs: []*runner.RunResult{{Stdout: test.actual, ExitCode: 0}}}
-			result, err := runTestCases(context.Background(), executor, &Sandbox{ContainerName: "test"}, job, languages.Cpp{})
+			result, err := runTestCases(context.Background(), executor, &Sandbox{ContainerName: "test"}, "", job, languages.Cpp{})
 			if err != nil {
 				t.Fatalf("runTestCases() error = %v", err)
 			}
@@ -335,7 +359,7 @@ public:
 	}
 
 	executor := &testcaseExecutor{runs: []*runner.RunResult{{Stdout: string(actual), ExitCode: 0}}}
-	result, err := runTestCases(context.Background(), executor, &Sandbox{ContainerName: "test"}, job, languages.Cpp{})
+	result, err := runTestCases(context.Background(), executor, &Sandbox{ContainerName: "test"}, "", job, languages.Cpp{})
 	if err != nil {
 		t.Fatalf("runTestCases() error = %v", err)
 	}
@@ -352,7 +376,7 @@ func TestRunTestCasesPreservesSubMiBMemory(t *testing.T) {
 		MemoryUsed: 512 * 1024,
 	}}}
 
-	result, err := runTestCases(context.Background(), executor, &Sandbox{ContainerName: "test"}, job, languages.Python{})
+	result, err := runTestCases(context.Background(), executor, &Sandbox{ContainerName: "test"}, "", job, languages.Python{})
 	if err != nil {
 		t.Fatalf("runTestCases() error = %v", err)
 	}
@@ -376,12 +400,15 @@ func TestRunTestCasesUsesMaximumRuntime(t *testing.T) {
 		{Stdout: "ok", ExitCode: 0, TimeUsed: 12 * time.Millisecond, MemoryUsed: 3 * 1024 * 1024},
 	}}
 
-	result, err := runTestCases(context.Background(), executor, &Sandbox{ContainerName: "test"}, job, languages.Python{})
+	result, err := runTestCases(context.Background(), executor, &Sandbox{ContainerName: "test"}, "", job, languages.Python{})
 	if err != nil {
 		t.Fatalf("runTestCases() error = %v", err)
 	}
 	if result.Status != Accepted || result.RuntimeMs != 12 {
 		t.Fatalf("result = %+v, want accepted with 12ms", result)
+	}
+	if executor.resetCalls != 2 || executor.prepareCalls != 2 {
+		t.Fatalf("cleanup calls = reset:%d prepare:%d, want one after each testcase", executor.resetCalls, executor.prepareCalls)
 	}
 	if result.PassedTestCases != 2 || result.TotalTestCases != 2 {
 		t.Fatalf("passed/total = %d/%d, want 2/2", result.PassedTestCases, result.TotalTestCases)
@@ -464,6 +491,51 @@ func TestProcessSubmissionPersistsInfrastructureResult(t *testing.T) {
 	}
 }
 
+func TestRunTestCasesCleanupIsOutsideCaseDeadlineAndRuntime(t *testing.T) {
+	job := testCaseJob("ok")
+	job.Limits.TimeLimitMs = 5
+	executor := &testcaseExecutor{
+		cleanupDelay:   15 * time.Millisecond,
+		waitRunContext: true,
+		runs: []*runner.RunResult{{
+			Stdout:   "partial",
+			TimedOut: true,
+			TimeUsed: 3 * time.Millisecond,
+		}},
+	}
+
+	result, err := runTestCases(context.Background(), executor, &Sandbox{ContainerName: "test"}, t.TempDir(), job, languages.Python{})
+	if err != nil {
+		t.Fatalf("runTestCases() error = %v", err)
+	}
+	if result.Status != TimeLimitExceeded || result.RuntimeMs != 3 {
+		t.Fatalf("result = %+v, want timeout with 3ms testcase runtime", result)
+	}
+	if executor.resetContextErr != nil || executor.prepareContextErr != nil {
+		t.Fatalf("cleanup contexts were already canceled: reset=%v prepare=%v", executor.resetContextErr, executor.prepareContextErr)
+	}
+}
+
+func TestRunTestCasesMarksSandboxForReplacementWhenCleanupFails(t *testing.T) {
+	job := testCaseJob("ok")
+	executor := &testcaseExecutor{
+		resetErr: errors.New("restart failed"),
+		runs:     []*runner.RunResult{{Stdout: "ok", ExitCode: 0}},
+	}
+	sandbox := &Sandbox{ContainerName: "test"}
+
+	_, err := runTestCases(context.Background(), executor, sandbox, t.TempDir(), job, languages.Python{})
+	if err == nil || !strings.Contains(err.Error(), "restart failed") {
+		t.Fatalf("runTestCases() error = %v, want cleanup failure", err)
+	}
+	if !sandbox.needsReplace {
+		t.Fatal("sandbox was not marked for replacement after cleanup failed")
+	}
+	if executor.prepareCalls != 0 {
+		t.Fatalf("prepare calls = %d, want none after failed restart", executor.prepareCalls)
+	}
+}
+
 func TestRunTestCasesPassedCountOnFailure(t *testing.T) {
 	job := testCaseJob("ok")
 	job.TestCases = []TestCase{
@@ -477,7 +549,7 @@ func TestRunTestCasesPassedCountOnFailure(t *testing.T) {
 		{Stdout: "wrong", ExitCode: 0, TimeUsed: 1 * time.Millisecond, MemoryUsed: 2 * 1024 * 1024},
 	}}
 
-	result, err := runTestCases(context.Background(), executor, &Sandbox{ContainerName: "test"}, job, languages.Python{})
+	result, err := runTestCases(context.Background(), executor, &Sandbox{ContainerName: "test"}, "", job, languages.Python{})
 	if err != nil {
 		t.Fatalf("runTestCases() error = %v", err)
 	}

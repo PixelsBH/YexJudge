@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	schema "yexjudge/db"
 	"yexjudge/internal/judge"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -71,6 +72,10 @@ func TestAPIIntegration(t *testing.T) {
 	db, err := sql.Open("pgx", databaseURL)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if err := schema.Apply(context.Background(), db); err != nil {
+		_ = db.Close()
+		t.Fatalf("apply database migrations: %v", err)
 	}
 	if _, err := db.Exec(`
 		INSERT INTO submissions

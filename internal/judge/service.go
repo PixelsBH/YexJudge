@@ -127,7 +127,11 @@ func (s *Service) ProcessSubmission(ctx context.Context, submission Submission) 
 	if err != nil {
 		return infrastructureFailure("create workspace: " + err.Error())
 	}
-	defer os.RemoveAll(workspace)
+	defer func() {
+		if err := os.RemoveAll(workspace); err != nil {
+			slog.Error("failed to remove submission workspace", "submission_id", submission.ID, "error", err)
+		}
+	}()
 
 	if spec.NeedsCompile() {
 		compileStarted := time.Now()
@@ -216,7 +220,7 @@ func (s *Service) ProcessSubmission(ctx context.Context, submission Submission) 
 	)
 
 	testcaseStarted := time.Now()
-	result, err := runTestCases(ctx, s.executor, sandbox, submission.Job, spec)
+	result, err := runTestCases(ctx, s.executor, sandbox, workspace, submission.Job, spec)
 	testcaseDuration := time.Since(testcaseStarted)
 	s.metrics.ObserveTestcase(testcaseDuration)
 	s.metrics.ObserveRuntime(time.Duration(result.RuntimeMs) * time.Millisecond)

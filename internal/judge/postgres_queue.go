@@ -114,11 +114,12 @@ func (q *PostgresSubmissionQueue) Dequeue(ctx context.Context) (SubmissionClaim,
 }
 
 func (q *PostgresSubmissionQueue) RenewLease(ctx context.Context, claim SubmissionClaim) error {
-	leaseExpiresAt := time.Now().Add(q.leaseDuration)
+	opCtx, cancel := context.WithTimeout(ctx, databaseOperationTimeout)
+	defer cancel()
 	result, err := q.db.ExecContext(
-		ctx,
+		opCtx,
 		`UPDATE submissions
-		 SET lease_expires_at = $3,
+		 SET lease_expires_at = GREATEST(lease_expires_at, NOW() + $3::interval),
 		     updated_at = NOW()
 		 WHERE id = $1
 		   AND status = $2
@@ -126,7 +127,7 @@ func (q *PostgresSubmissionQueue) RenewLease(ctx context.Context, claim Submissi
 		   AND lease_expires_at > NOW()`,
 		claim.ID,
 		SubmissionRunning,
-		leaseExpiresAt,
+		leaseInterval(q.leaseDuration),
 		claim.Attempt,
 	)
 	if err != nil {
@@ -143,14 +144,16 @@ func (q *PostgresSubmissionQueue) RenewLease(ctx context.Context, claim Submissi
 }
 
 func (q *PostgresSubmissionQueue) RecoverExpired(ctx context.Context) (int, error) {
-	tx, err := q.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
+	opCtx, cancel := context.WithTimeout(ctx, databaseOperationTimeout)
+	defer cancel()
+	tx, err := q.db.BeginTx(opCtx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if err != nil {
 		return 0, err
 	}
 	defer tx.Rollback()
 
 	rows, err := tx.QueryContext(
-		ctx,
+		opCtx,
 		`SELECT id, attempt_count
 		 FROM submissions
 		 WHERE status = $1
@@ -191,7 +194,7 @@ func (q *PostgresSubmissionQueue) RecoverExpired(ctx context.Context) (int, erro
 		if attempt < q.maxAttempts {
 			message = fmt.Sprintf("%s; retrying attempt %d of %d", message, attempt+1, q.maxAttempts)
 			if _, err := tx.ExecContext(
-				ctx,
+				opCtx,
 				`UPDATE submissions
 				 SET status = $2,
 				     result = NULL,
@@ -215,7 +218,7 @@ func (q *PostgresSubmissionQueue) RecoverExpired(ctx context.Context) (int, erro
 				return 0, marshalErr
 			}
 			if _, err := tx.ExecContext(
-				ctx,
+				opCtx,
 				`UPDATE submissions
 				 SET status = $2,
 				     result = $3,
@@ -245,7 +248,9 @@ func (q *PostgresSubmissionQueue) Close() {
 }
 
 func (q *PostgresSubmissionQueue) claimNextSubmission(ctx context.Context) (SubmissionClaim, bool, error) {
-	tx, err := q.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
+	opCtx, cancel := context.WithTimeout(ctx, databaseOperationTimeout)
+	defer cancel()
+	tx, err := q.db.BeginTx(opCtx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if err != nil {
 		return SubmissionClaim{}, false, err
 	}
@@ -253,7 +258,7 @@ func (q *PostgresSubmissionQueue) claimNextSubmission(ctx context.Context) (Subm
 
 	var claim SubmissionClaim
 	err = tx.QueryRowContext(
-		ctx,
+		opCtx,
 		`UPDATE submissions
 		 SET status = $1,
 		     attempt_count = attempt_count + 1,

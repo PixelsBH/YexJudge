@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -15,11 +16,17 @@ import (
 )
 
 const (
-	RuntimeSandboxImage     = "yexjudge-runtime:latest"
-	MinCompileMemoryLimitMb = 512
-	CompileTimeout          = 30 * time.Second
-	sandboxReadyTimeout     = 2 * time.Second
-	sandboxReadyPoll        = 50 * time.Millisecond
+	RuntimeSandboxImage         = "yexjudge-runtime:latest"
+	MinCompileMemoryLimitMb     = 512
+	CompileTimeout              = 30 * time.Second
+	compileWorkspaceTmpfsBytes  = 128 << 20
+	compileTemporaryTmpfsBytes  = 256 << 20
+	compileFileSizeLimitBytes   = 128 << 20
+	compileArtifactArchiveBytes = 80 << 20
+	transferCleanupTimeout      = 5 * time.Second
+	caseCleanupTimeout          = 30 * time.Second
+	sandboxReadyTimeout         = 2 * time.Second
+	sandboxReadyPoll            = 50 * time.Millisecond
 )
 
 type Executor interface {
@@ -115,6 +122,13 @@ func compileContainerUser() string {
 	return fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid())
 }
 
+func compileContainerTmpfsOwner() string {
+	if os.Getuid() == 0 {
+		return "uid=10001,gid=10001"
+	}
+	return fmt.Sprintf("uid=%d,gid=%d", os.Getuid(), os.Getgid())
+}
+
 func (e *DockerExecutor) Compile(ctx context.Context,
 	workspace string, spec languages.Spec, limits Limits) (*runner.RunResult, error) {
 	ctxCompile, cancel := context.WithTimeout(ctx, CompileTimeout)
@@ -126,11 +140,39 @@ func (e *DockerExecutor) Compile(ctx context.Context,
 		_, _ = e.runner.Run(cleanupCtx, "", "docker", "rm", "-f", compileContainer)
 	}()
 
+	sourceName := filepath.Base(spec.SourceFileName())
+	if sourceName == "." || sourceName == string(filepath.Separator) || sourceName != spec.SourceFileName() {
+		return nil, fmt.Errorf("invalid compiler source filename %q", spec.SourceFileName())
+	}
+	if _, err := os.Stat(filepath.Join(workspace, sourceName)); err != nil {
+		return nil, fmt.Errorf("stat compiler source: %w", err)
+	}
+
+	archiveDirectory, err := os.MkdirTemp("", "yexjudge-compiler-archive-*")
+	if err != nil {
+		return nil, fmt.Errorf("create compiler archive directory: %w", err)
+	}
+	defer os.RemoveAll(archiveDirectory)
+	if os.Getuid() == 0 {
+		if err := os.Chown(archiveDirectory, 10001, 10001); err != nil {
+			return nil, fmt.Errorf("set compiler archive directory owner: %w", err)
+		}
+	}
+	archivePath := filepath.Join(archiveDirectory, "artifacts.tar")
+
 	compileMemoryMb := limits.MemoryLimitMb
 	if compileMemoryMb < MinCompileMemoryLimitMb {
 		compileMemoryMb = MinCompileMemoryLimitMb
 	}
-
+	compileScript := fmt.Sprintf(`cp -- /source/%s /workspace/%s || exit $?
+"$@" || exit $?
+tar -C /workspace -cf /artifacts/artifacts.tar . || exit $?
+archive_size=$(wc -c < /artifacts/artifacts.tar) || exit $?
+[ "$archive_size" -le %d ] || { echo 'compiler artifact archive exceeds the allowed size' >&2; exit 1; }`,
+		shellQuote(sourceName),
+		shellQuote(sourceName),
+		compileArtifactArchiveBytes,
+	)
 	args := []string{
 		"run",
 		"--rm",
@@ -143,19 +185,37 @@ func (e *DockerExecutor) Compile(ctx context.Context,
 		"--cap-drop", "ALL",
 		"--security-opt", "no-new-privileges",
 		"--read-only",
-		"--tmpfs", "/tmp:rw,exec,nosuid,size=128m,mode=1777",
+		"--tmpfs", fmt.Sprintf("/workspace:rw,exec,size=%dm,mode=700,%s", compileWorkspaceTmpfsBytes/(1<<20), compileContainerTmpfsOwner()),
+		"--tmpfs", fmt.Sprintf("/tmp:rw,exec,nosuid,size=%dm,mode=700,%s", compileTemporaryTmpfsBytes/(1<<20), compileContainerTmpfsOwner()),
 		"--env", "HOME=/tmp",
 		"--env", "GOCACHE=/tmp/go-build",
 		"--env", "GOMODCACHE=/tmp/go-mod",
 		"--ulimit", "nofile=1024:1024",
+		"--ulimit", fmt.Sprintf("fsize=%d:%d", compileFileSizeLimitBytes, compileFileSizeLimitBytes),
 		"--user", compileContainerUser(),
 		"--workdir", "/workspace",
-		"-v", workspace + ":/workspace:rw",
+		"-v", workspace + ":/source:ro",
+		"-v", archiveDirectory + ":/artifacts:rw",
 		spec.CompileImage(),
+		"sh", "-c", compileScript, "yexjudge-compile",
 	}
 	args = append(args, spec.CompileCommand()...)
 
-	return e.runner.Run(ctxCompile, "", "docker", args...)
+	result, err := e.runner.Run(ctxCompile, "", "docker", args...)
+	if result == nil && err == nil {
+		return nil, fmt.Errorf("compile container returned no result")
+	}
+	if err != nil || result.ExitCode != 0 || result.OutputLimitExceeded || ctxCompile.Err() != nil {
+		return result, err
+	}
+	if err := importCompilerArtifacts(archivePath, workspace); err != nil {
+		return nil, fmt.Errorf("import compiler artifacts: %w", err)
+	}
+	return result, nil
+}
+
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
 }
 
 func (e *DockerExecutor) StartSandbox(ctx context.Context) (*Sandbox, error) {
@@ -222,7 +282,137 @@ func (e *DockerExecutor) ConfigureSandbox(ctx context.Context, sandbox *Sandbox,
 	return dockerCommandError("configure sandbox", result)
 }
 
+type boundedArchiveWriter struct {
+	writer    io.Writer
+	remaining int64
+}
+
+func (w *boundedArchiveWriter) Write(data []byte) (int, error) {
+	if int64(len(data)) <= w.remaining {
+		n, err := w.writer.Write(data)
+		w.remaining -= int64(n)
+		return n, err
+	}
+	if w.remaining <= 0 {
+		return 0, fmt.Errorf("archive exceeds the %d-byte limit", maxWorkspaceArchiveSize)
+	}
+	n, err := w.writer.Write(data[:w.remaining])
+	w.remaining -= int64(n)
+	if err != nil {
+		return n, err
+	}
+	return n, fmt.Errorf("archive exceeds the %d-byte limit", maxWorkspaceArchiveSize)
+}
+
+type commandProcess struct {
+	command *exec.Cmd
+	done    <-chan error
+}
+
+func stopAndReapCommands(commands ...commandProcess) []error {
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), transferCleanupTimeout)
+	defer cancel()
+	for _, process := range commands {
+		if process.command.Process != nil {
+			_ = process.command.Process.Kill()
+		}
+	}
+
+	commandErrors := make([]error, len(commands))
+	for i, process := range commands {
+		select {
+		case commandErrors[i] = <-process.done:
+		case <-cleanupCtx.Done():
+			commandErrors[i] = cleanupCtx.Err()
+			return commandErrors
+		}
+	}
+	return commandErrors
+}
+
+func transferWorkspaceArchive(ctx context.Context, producer, extractor *exec.Cmd) error {
+	pipeReader, pipeWriter := io.Pipe()
+	defer pipeReader.Close()
+	defer pipeWriter.Close()
+	producer.Stdout = &boundedArchiveWriter{writer: pipeWriter, remaining: maxWorkspaceArchiveSize}
+	extractor.Stdin = pipeReader
+
+	if err := extractor.Start(); err != nil {
+		_ = pipeReader.Close()
+		_ = pipeWriter.CloseWithError(err)
+		return fmt.Errorf("start docker extract: %w", err)
+	}
+	extractorDone := make(chan error, 1)
+	go func() { extractorDone <- extractor.Wait() }()
+
+	if err := producer.Start(); err != nil {
+		_ = pipeReader.Close()
+		_ = pipeWriter.CloseWithError(err)
+		reapErrors := stopAndReapCommands(commandProcess{command: extractor, done: extractorDone})
+		if reapErrors[0] != nil {
+			return fmt.Errorf("start tar archive: %w (reap extractor: %v)", err, reapErrors[0])
+		}
+		return fmt.Errorf("start tar archive: %w", err)
+	}
+	producerDone := make(chan error, 1)
+	go func() { producerDone <- producer.Wait() }()
+
+	var producerErr error
+	producerFinished := false
+	for {
+		select {
+		case producerErr = <-producerDone:
+			producerFinished = true
+			if producerErr != nil {
+				_ = pipeWriter.CloseWithError(producerErr)
+				_ = pipeReader.Close()
+				reapErrors := stopAndReapCommands(commandProcess{command: extractor, done: extractorDone})
+				if reapErrors[0] != nil {
+					return fmt.Errorf("archive workspace: %w (extractor: %v)", producerErr, reapErrors[0])
+				}
+				return fmt.Errorf("archive workspace: %w", producerErr)
+			}
+			_ = pipeWriter.Close()
+		case extractorErr := <-extractorDone:
+			if !producerFinished {
+				_ = pipeReader.Close()
+				_ = pipeWriter.CloseWithError(fmt.Errorf("extractor exited before archive completed"))
+				reapErrors := stopAndReapCommands(commandProcess{command: producer, done: producerDone})
+				producerErr = reapErrors[0]
+				if extractorErr != nil {
+					return fmt.Errorf("extract workspace into sandbox: %w: extractor exited before archive completed", extractorErr)
+				}
+				if producerErr != nil {
+					return fmt.Errorf("extractor exited before archive completed (producer: %v)", producerErr)
+				}
+				return fmt.Errorf("extractor exited before archive completed")
+			}
+			if extractorErr != nil {
+				return fmt.Errorf("extract workspace into sandbox: %w", extractorErr)
+			}
+			return nil
+		case <-ctx.Done():
+			_ = pipeReader.Close()
+			_ = pipeWriter.CloseWithError(ctx.Err())
+			var reapErrors []error
+			if producerFinished {
+				reapErrors = stopAndReapCommands(commandProcess{command: extractor, done: extractorDone})
+				return fmt.Errorf("transfer workspace archive canceled: %w (extractor: %v)", ctx.Err(), reapErrors[0])
+			}
+			reapErrors = stopAndReapCommands(
+				commandProcess{command: producer, done: producerDone},
+				commandProcess{command: extractor, done: extractorDone},
+			)
+			return fmt.Errorf("transfer workspace archive canceled: %w (producer: %v, extractor: %v)", ctx.Err(), reapErrors[0], reapErrors[1])
+		}
+	}
+}
+
 func (e *DockerExecutor) PrepareSandbox(ctx context.Context, sandbox *Sandbox, workspace string) error {
+	if err := validateWorkspaceForTransfer(workspace); err != nil {
+		return err
+	}
+
 	result, err := e.runner.Run(
 		ctx,
 		"",
@@ -240,8 +430,8 @@ func (e *DockerExecutor) PrepareSandbox(ctx context.Context, sandbox *Sandbox, w
 		return err
 	}
 
-	tarCmd := exec.CommandContext(ctx, "tar", "-C", workspace, "-cf", "-", ".")
-	dockerCmd := exec.CommandContext(
+	producer := exec.CommandContext(ctx, "tar", "-C", workspace, "-cf", "-", ".")
+	extractor := exec.CommandContext(
 		ctx,
 		"docker",
 		"exec",
@@ -253,43 +443,16 @@ func (e *DockerExecutor) PrepareSandbox(ctx context.Context, sandbox *Sandbox, w
 		"-C",
 		"/workspace",
 	)
-
-	pipeReader, pipeWriter := io.Pipe()
-	defer pipeReader.Close()
-
-	tarCmd.Stdout = pipeWriter
-	dockerCmd.Stdin = pipeReader
-
-	var tarStderr diagnosticBuffer
-	var dockerStderr diagnosticBuffer
-	tarStderr.limit = runner.DefaultOutputLimitBytes
-	dockerStderr.limit = runner.DefaultOutputLimitBytes
-	tarCmd.Stderr = &tarStderr
-	dockerCmd.Stderr = &dockerStderr
-
-	if err := dockerCmd.Start(); err != nil {
-		pipeWriter.Close()
-		return fmt.Errorf("start docker extract: %w", err)
+	var producerStderr diagnosticBuffer
+	var extractorStderr diagnosticBuffer
+	producerStderr.limit = runner.DefaultOutputLimitBytes
+	extractorStderr.limit = runner.DefaultOutputLimitBytes
+	producer.Stderr = &producerStderr
+	extractor.Stderr = &extractorStderr
+	if err := transferWorkspaceArchive(ctx, producer, extractor); err != nil {
+		return fmt.Errorf("transfer workspace archive: %w; tar: %s; docker: %s", err, producerStderr.String(), extractorStderr.String())
 	}
 
-	if err := tarCmd.Start(); err != nil {
-		pipeWriter.Close()
-		_ = dockerCmd.Process.Kill()
-		_ = dockerCmd.Wait()
-		return fmt.Errorf("start tar archive: %w", err)
-	}
-
-	tarErr := tarCmd.Wait()
-	pipeWriter.Close()
-	dockerErr := dockerCmd.Wait()
-
-	if tarErr != nil {
-		return fmt.Errorf("archive workspace: %w: %s", tarErr, tarStderr.String())
-	}
-
-	if dockerErr != nil {
-		return fmt.Errorf("extract workspace into sandbox: %w: %s", dockerErr, dockerStderr.String())
-	}
 	result, err = e.runner.Run(
 		ctx,
 		"",

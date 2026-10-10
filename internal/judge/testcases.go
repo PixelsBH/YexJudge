@@ -13,7 +13,7 @@ import (
 
 func runTestCases(
 	ctx context.Context, executor Executor,
-	sandbox *Sandbox, job Job, spec languages.Spec) (Result, error) {
+	sandbox *Sandbox, workspace string, job Job, spec languages.Spec) (Result, error) {
 	maxRuntimeMs := 0
 	var maxMemoryBytes int64
 	total := len(job.TestCases)
@@ -33,6 +33,15 @@ func runTestCases(
 		)
 
 		cancelRun()
+
+		if cleanupErr := resetAndRestageSandbox(executor, sandbox, workspace); cleanupErr != nil {
+			sandbox.needsReplace = true
+			if err != nil {
+				return Result{}, fmt.Errorf("test case %d failed: %v; sandbox cleanup failed: %w", tc.ID, err, cleanupErr)
+			}
+			return Result{}, fmt.Errorf("cleanup after test case %d: %w", tc.ID, cleanupErr)
+		}
+		sandbox.restarted = true
 
 		if err != nil {
 			return Result{}, err
@@ -123,6 +132,18 @@ func runTestCases(
 		RuntimeMs:       maxRuntimeMs,
 		MemoryMb:        float64(maxMemoryBytes) / (1024 * 1024),
 	}, nil
+}
+
+func resetAndRestageSandbox(executor Executor, sandbox *Sandbox, workspace string) error {
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), caseCleanupTimeout)
+	defer cancel()
+	if err := executor.ResetSandbox(cleanupCtx, sandbox); err != nil {
+		return fmt.Errorf("restart sandbox: %w", err)
+	}
+	if err := executor.PrepareSandbox(cleanupCtx, sandbox, workspace); err != nil {
+		return fmt.Errorf("restage testcase snapshot: %w", err)
+	}
+	return nil
 }
 
 func functionOutputsEqual(job Job, actual, expected string) bool {

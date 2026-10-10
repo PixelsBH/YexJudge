@@ -30,15 +30,20 @@ func submitHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	submission, err := createAndQueueSubmission(job)
+	ctx, cancel := context.WithTimeout(r.Context(), submitTimeout)
+	defer cancel()
+	submission, err := createAndQueueSubmission(ctx, job)
 	if err != nil {
-		writeAPIError(w, http.StatusInternalServerError, "internal_error", "internal error")
+		writeSubmissionAdmissionError(w, err)
 		log.Println("failed to create submission:", err)
 		return
 	}
 
 	w.Header().Set("Location", "/submissions/"+submission.ID)
-	result, completed := waitForSubmission(r.Context(), submission.ID, submitTimeout)
+	result, completed := waitForSubmission(ctx, submission.ID, submitTimeout)
+	if result.ID == "" {
+		result = submission
+	}
 	if !completed {
 		writeJSON(w, http.StatusAccepted, judge.SubmissionAcceptedResponse{
 			SubmissionID: submission.ID,
@@ -62,7 +67,13 @@ func waitForSubmission(ctx context.Context, id string, timeout time.Duration) (j
 	defer ticker.Stop()
 
 	for {
-		submission, ok := submissionStore.Get(id)
+		if ctx.Err() != nil {
+			return judge.Submission{}, false
+		}
+		submission, ok, err := getSubmission(ctx, id)
+		if err != nil {
+			return judge.Submission{}, false
+		}
 		if ok && (submission.Status == judge.SubmissionFinished || submission.Status == judge.SubmissionFailed) {
 			return submission, true
 		}
@@ -71,7 +82,8 @@ func waitForSubmission(ctx context.Context, id string, timeout time.Duration) (j
 		case <-ctx.Done():
 			return submission, false
 		case <-deadline.C:
-			if latest, ok := submissionStore.Get(id); ok {
+			latest, ok, err := getSubmission(ctx, id)
+			if err == nil && ok {
 				return latest, false
 			}
 			return submission, false

@@ -123,7 +123,34 @@ func stringLiteral(raw json.RawMessage) (string, error) {
 	if err := json.Unmarshal(raw, &value); err != nil {
 		return "", fmt.Errorf("expected string: %w", err)
 	}
-	return strconv.Quote(value), nil
+
+	var escaped strings.Builder
+	escaped.Grow(len(value))
+	for i := 0; i < len(value); i++ {
+		byteValue := value[i]
+		switch {
+		case byteValue == '"':
+			escaped.WriteString(`\"`)
+		case byteValue == '\\':
+			escaped.WriteString(`\\`)
+		case byteValue >= 0x20 && byteValue <= 0x7e:
+			escaped.WriteByte(byteValue)
+		default:
+			escaped.WriteByte('\\')
+			escaped.WriteByte(byte('0' + (byteValue >> 6)))
+			escaped.WriteByte(byte('0' + ((byteValue >> 3) & 7)))
+			escaped.WriteByte(byte('0' + (byteValue & 7)))
+		}
+	}
+
+	var literal strings.Builder
+	literal.Grow(escaped.Len() + 32)
+	literal.WriteString(`std::string("`)
+	literal.WriteString(escaped.String())
+	literal.WriteString(`", `)
+	literal.WriteString(strconv.Itoa(len(value)))
+	literal.WriteByte(')')
+	return literal.String(), nil
 }
 
 func stringCanonical(raw json.RawMessage) (string, error) {

@@ -1,7 +1,12 @@
 package judge
 
 import (
+	"archive/tar"
 	"context"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -54,13 +59,48 @@ func hasExecutorArg(args []string, want ...string) bool {
 	return false
 }
 
-func TestDockerExecutorCompileUsesRestrictedContainer(t *testing.T) {
-	recorder := &recordingRunner{}
+func TestDockerExecutorCompileUsesBoundedIsolatedOutput(t *testing.T) {
+	workspace := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workspace, "main.cpp"), []byte("int main() {}"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	recorder := &recordingRunner{resultFor: func(call executorCall) *runner.RunResult {
+		if len(call.args) > 0 && call.args[0] == "run" {
+			var archiveDirectory string
+			for i, arg := range call.args {
+				if arg == "-v" && i+1 < len(call.args) && strings.HasSuffix(call.args[i+1], ":/artifacts:rw") {
+					archiveDirectory = strings.TrimSuffix(call.args[i+1], ":/artifacts:rw")
+					break
+				}
+			}
+			if archiveDirectory == "" {
+				t.Fatal("compile container did not mount its artifact directory")
+			}
+			archive, err := os.Create(filepath.Join(archiveDirectory, "artifacts.tar"))
+			if err != nil {
+				t.Fatalf("create mock compiler archive: %v", err)
+			}
+			tarWriter := tar.NewWriter(archive)
+			if err := tarWriter.WriteHeader(&tar.Header{Name: "./main", Mode: 0755, Size: 3, Typeflag: tar.TypeReg}); err != nil {
+				t.Fatalf("write mock compiler archive header: %v", err)
+			}
+			if _, err := tarWriter.Write([]byte("bin")); err != nil {
+				t.Fatalf("write mock compiler artifact: %v", err)
+			}
+			if err := tarWriter.Close(); err != nil {
+				t.Fatalf("close mock compiler archive: %v", err)
+			}
+			if err := archive.Close(); err != nil {
+				t.Fatalf("close mock compiler archive file: %v", err)
+			}
+		}
+		return nil
+	}}
 	executor := NewDockerExecutor(recorder)
 
 	result, err := executor.Compile(
 		context.Background(),
-		"/tmp/workspace",
+		workspace,
 		languages.Cpp{},
 		Limits{TimeLimitMs: 1000, MemoryLimitMb: 128},
 	)
@@ -71,7 +111,7 @@ func TestDockerExecutorCompileUsesRestrictedContainer(t *testing.T) {
 		t.Fatalf("Compile() result = %+v, want success", result)
 	}
 	if len(recorder.calls) != 2 {
-		t.Fatalf("docker calls = %d, want compile plus cleanup", len(recorder.calls))
+		t.Fatalf("docker calls = %d, want compile and cleanup", len(recorder.calls))
 	}
 	args := recorder.calls[0].args
 	for _, required := range [][]string{
@@ -85,10 +125,37 @@ func TestDockerExecutorCompileUsesRestrictedContainer(t *testing.T) {
 		{"--user", compileContainerUser()},
 		{"--workdir", "/workspace"},
 		{"--ulimit", "nofile=1024:1024"},
+		{"--ulimit", "fsize=134217728:134217728"},
+		{"--tmpfs", fmt.Sprintf("/workspace:rw,exec,size=128m,mode=700,%s", compileContainerTmpfsOwner())},
+		{"-v", workspace + ":/source:ro"},
 	} {
 		if !hasExecutorArg(args, required...) {
 			t.Errorf("compile args missing %q: %v", required, args)
 		}
+	}
+	if !hasExecutorArg(args, "sh", "-c") || !strings.Contains(strings.Join(args, " "), `"$@"`) || !strings.Contains(strings.Join(args, " "), "/artifacts/artifacts.tar") {
+		t.Fatalf("compile command does not wrap compiler output export: %v", args)
+	}
+	if _, err := os.Stat(filepath.Join(workspace, "main")); err != nil {
+		t.Fatalf("compiler artifact was not imported into workspace: %v", err)
+	}
+	if recorder.calls[1].args[0] != "rm" {
+		t.Fatalf("second docker call = %v, want container cleanup", recorder.calls[1].args)
+	}
+}
+
+func TestTransferWorkspaceArchiveDoesNotHangWhenExtractorExitsEarly(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	producer := exec.CommandContext(ctx, "sh", "-c", "dd if=/dev/zero bs=1048576 count=64 2>/dev/null")
+	extractor := exec.CommandContext(ctx, "sh", "-c", "exit 0")
+	started := time.Now()
+	err := transferWorkspaceArchive(ctx, producer, extractor)
+	if err == nil {
+		t.Fatal("transferWorkspaceArchive() unexpectedly accepted an early extractor exit")
+	}
+	if elapsed := time.Since(started); elapsed >= 2*time.Second {
+		t.Fatalf("transferWorkspaceArchive() took %s after extractor exit, want under 2s", elapsed)
 	}
 }
 

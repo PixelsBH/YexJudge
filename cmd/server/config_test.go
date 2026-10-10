@@ -14,12 +14,26 @@ func TestValidateConfigDefaults(t *testing.T) {
 	if cfg.workerCount != defaultWorkerCount || cfg.sandboxPoolSize != defaultSandboxPoolSize || cfg.compileSlots != defaultCompileSlots {
 		t.Fatalf("capacity defaults = workers %d, sandboxes %d, compile slots %d", cfg.workerCount, cfg.sandboxPoolSize, cfg.compileSlots)
 	}
+	if cfg.maxQueued != defaultMaxQueued {
+		t.Fatalf("MAX_QUEUED = %d, want default %d", cfg.maxQueued, defaultMaxQueued)
+	}
 }
 
 func TestLoadConfigRejectsInvalidCapacity(t *testing.T) {
 	t.Setenv("WORKER_COUNT", "0")
 	if _, err := loadConfig(); err == nil || !strings.Contains(err.Error(), "WORKER_COUNT") {
 		t.Fatalf("loadConfig() error = %v, want WORKER_COUNT validation", err)
+	}
+}
+
+func TestLoadConfigRejectsInvalidMaxQueued(t *testing.T) {
+	for _, value := range []string{"0", "100001", "invalid"} {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv("MAX_QUEUED", value)
+			if _, err := loadConfig(); err == nil || !strings.Contains(err.Error(), "MAX_QUEUED") {
+				t.Fatalf("loadConfig() error = %v, want MAX_QUEUED validation", err)
+			}
+		})
 	}
 }
 
@@ -36,7 +50,7 @@ func TestValidateConfigRejectsUnsafeMemoryReservation(t *testing.T) {
 }
 
 func TestLoadConfigRejectsInvalidInteger(t *testing.T) {
-	for _, key := range []string{"WORKER_COUNT", "SANDBOX_POOL_SIZE", "COMPILE_SLOTS"} {
+	for _, key := range []string{"WORKER_COUNT", "SANDBOX_POOL_SIZE", "COMPILE_SLOTS", "MAX_QUEUED"} {
 		t.Run(key, func(t *testing.T) {
 			_ = os.Setenv(key, "not-a-number")
 			t.Cleanup(func() { _ = os.Unsetenv(key) })

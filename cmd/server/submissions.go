@@ -19,7 +19,11 @@ func submissionHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	submission, ok := submissionStore.Get(id)
+	submission, ok, err := getSubmission(r.Context(), id)
+	if err != nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "persistence_unavailable", "submission storage is temporarily unavailable")
+		return
+	}
 	if !ok {
 		writeAPIError(w, http.StatusNotFound, "not_found", "submission not found")
 		return

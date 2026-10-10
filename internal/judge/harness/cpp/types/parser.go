@@ -6,6 +6,11 @@ import (
 	"unicode"
 )
 
+const (
+	maxTypeLength = 4096
+	maxTypeDepth  = 64
+)
+
 type typeParser struct {
 	input []rune
 	pos   int
@@ -15,12 +20,15 @@ type typeParser struct {
 // TypeRef. It supports the type forms accepted by the function harness and is
 // designed to grow as runtime types are registered.
 func Parse(declaredType string) (TypeRef, error) {
+	if len(declaredType) > maxTypeLength {
+		return TypeRef{}, fmt.Errorf("type exceeds maximum length of %d bytes", maxTypeLength)
+	}
 	parser := &typeParser{input: []rune(strings.TrimSpace(declaredType))}
 	if len(parser.input) == 0 {
 		return TypeRef{}, fmt.Errorf("type is empty")
 	}
 
-	ref, err := parser.parseType()
+	ref, err := parser.parseType(0)
 	if err != nil {
 		return TypeRef{}, err
 	}
@@ -31,7 +39,10 @@ func Parse(declaredType string) (TypeRef, error) {
 	return ref, nil
 }
 
-func (p *typeParser) parseType() (TypeRef, error) {
+func (p *typeParser) parseType(depth int) (TypeRef, error) {
+	if depth > maxTypeDepth {
+		return TypeRef{}, fmt.Errorf("type exceeds maximum template nesting depth of %d", maxTypeDepth)
+	}
 	p.skipSpace()
 
 	ref := TypeRef{}
@@ -64,8 +75,11 @@ func (p *typeParser) parseType() (TypeRef, error) {
 
 	p.skipSpace()
 	if p.consumeByte('<') {
+		if depth >= maxTypeDepth {
+			return TypeRef{}, fmt.Errorf("type exceeds maximum template nesting depth of %d", maxTypeDepth)
+		}
 		for {
-			argument, err := p.parseType()
+			argument, err := p.parseType(depth + 1)
 			if err != nil {
 				return TypeRef{}, err
 			}
@@ -128,10 +142,14 @@ func (p *typeParser) consumeWord(word string) bool {
 }
 
 func (p *typeParser) consumeString(value string) bool {
-	if !strings.HasPrefix(string(p.input[p.pos:]), value) {
-		return false
+	pos := p.pos
+	for _, expected := range value {
+		if pos >= len(p.input) || p.input[pos] != expected {
+			return false
+		}
+		pos++
 	}
-	p.pos += len([]rune(value))
+	p.pos = pos
 	return true
 }
 

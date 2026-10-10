@@ -48,9 +48,11 @@ func createSubmissionHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	submission, err := createAndQueueSubmission(job)
+	ctx, cancel := context.WithTimeout(r.Context(), submitTimeout)
+	defer cancel()
+	submission, err := createAndQueueSubmission(ctx, job)
 	if err != nil {
-		writeAPIError(w, http.StatusInternalServerError, "internal_error", "internal error")
+		writeSubmissionAdmissionError(w, err)
 		log.Println("failed to create submission:", err)
 		return
 	}
@@ -68,23 +70,28 @@ func createSubmissionHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func createAndQueueSubmission(job judge.Job) (judge.Submission, error) {
+func createAndQueueSubmission(ctx context.Context, job judge.Job) (judge.Submission, error) {
 	submission := judge.Submission{
 		ID:     fmt.Sprintf("%d", time.Now().UnixNano()),
 		Job:    job,
 		Status: judge.SubmissionQueued,
 	}
 
-	if err := submissionStore.Save(submission); err != nil {
-		return judge.Submission{}, err
-	}
-
-	if err := submissionQueue.Enqueue(submission.ID); err != nil {
-		submission.Status = judge.SubmissionFailed
-		if updateErr := submissionStore.Update(submission); updateErr != nil {
-			return judge.Submission{}, fmt.Errorf("enqueue failed: %v; failed to update submission: %w", err, updateErr)
+	if admittingStore, ok := submissionStore.(judge.AdmittingSubmissionStore); ok {
+		if err := admittingStore.SaveAdmitted(ctx, submission); err != nil {
+			return judge.Submission{}, err
 		}
-		return judge.Submission{}, err
+	} else {
+		if err := saveSubmission(ctx, submission); err != nil {
+			return judge.Submission{}, err
+		}
+		if err := submissionQueue.Enqueue(submission.ID); err != nil {
+			submission.Status = judge.SubmissionFailed
+			if updateErr := updateSubmission(ctx, submission); updateErr != nil {
+				return judge.Submission{}, fmt.Errorf("enqueue failed: %v; failed to update submission: %w", err, updateErr)
+			}
+			return judge.Submission{}, err
+		}
 	}
 	slog.Info("submission queued",
 		"submission_id", submission.ID,
@@ -93,6 +100,28 @@ func createAndQueueSubmission(job judge.Job) (judge.Submission, error) {
 	)
 
 	return submission, nil
+}
+
+func saveSubmission(ctx context.Context, submission judge.Submission) error {
+	if store, ok := submissionStore.(judge.ContextSubmissionStore); ok {
+		return store.SaveContext(ctx, submission)
+	}
+	return submissionStore.Save(submission)
+}
+
+func getSubmission(ctx context.Context, id string) (judge.Submission, bool, error) {
+	if store, ok := submissionStore.(judge.ContextSubmissionStore); ok {
+		return store.GetContext(ctx, id)
+	}
+	submission, found := submissionStore.Get(id)
+	return submission, found, nil
+}
+
+func updateSubmission(ctx context.Context, submission judge.Submission) error {
+	if store, ok := submissionStore.(judge.ContextSubmissionStore); ok {
+		return store.UpdateContext(ctx, submission)
+	}
+	return submissionStore.Update(submission)
 }
 
 func submissionsCollectionHandler(w http.ResponseWriter, r *http.Request) {
@@ -322,10 +351,7 @@ func main() {
 	mux.HandleFunc("/submissions/", submissionHandler)
 	mux.HandleFunc("/submit", submitHandler)
 
-	server := &http.Server{
-		Addr:    ":" + cfg.port,
-		Handler: requestIDMiddleware(mux),
-	}
+	server := newHTTPServer(":"+cfg.port, requestIDMiddleware(mux), cfg.submitTimeout)
 
 	shutdownDone := make(chan struct{})
 	go func() {
@@ -387,7 +413,10 @@ func buildPersistence(cfg config) (judge.SubmissionStore, judge.SubmissionQueue,
 		return nil, nil, nil, err
 	}
 
-	if err := sqlDB.Ping(); err != nil {
+	pingCtx, cancelPing := context.WithTimeout(context.Background(), 5*time.Second)
+	err = sqlDB.PingContext(pingCtx)
+	cancelPing()
+	if err != nil {
 		sqlDB.Close()
 		return nil, nil, nil, err
 	}
@@ -401,7 +430,7 @@ func buildPersistence(cfg config) (judge.SubmissionStore, judge.SubmissionQueue,
 
 	log.Println("using Postgres store and queue")
 
-	store := judge.NewPostgresSubmissionStore(sqlDB)
+	store := judge.NewPostgresSubmissionStoreWithQueueLimit(sqlDB, cfg.maxQueued)
 	queue := judge.NewPostgresSubmissionQueueWithOptions(
 		sqlDB,
 		cfg.queuePoll,

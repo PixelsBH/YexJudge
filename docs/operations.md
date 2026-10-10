@@ -93,6 +93,7 @@ QUEUE_POLL_INTERVAL_MS=500
 QUEUE_LEASE_MS=60000
 QUEUE_RECOVERY_INTERVAL_MS=1000
 QUEUE_MAX_ATTEMPTS=3
+MAX_QUEUED=100
 SUBMIT_TIMEOUT_MS=10000
 ```
 
@@ -101,15 +102,16 @@ Capacity and lifecycle details:
 - `WORKER_COUNT` bounds concurrent queue orchestration (default `4`, allowed `1-64`).
 - `SANDBOX_POOL_SIZE` bounds concurrent runtime execution (default `4`, allowed `1-64`).
 - `COMPILE_SLOTS` controls the separate compile-worker pool and concurrent disposable Docker compiler containers (default `2`, allowed `1-16`). Interpreted submissions do not consume compile workers.
+- `MAX_QUEUED` caps durable queued submissions across server instances (default `100`, allowed `1-100000`). Capacity is checked transactionally in PostgreSQL; requests over the limit receive `503` with `Retry-After`.
 - Startup rejects values outside those ranges and capacity configurations reserving more than 8 GiB. The default reservation is 3 GiB (`4 x 512 MiB` runtime sandboxes plus `2 x 512 MiB` compile slots).
 - During graceful shutdown, readiness becomes unavailable, new requests stop, active/queued work is cancelled within the shutdown deadline, workers are awaited, and pool-owned sandbox containers are removed.
 
 Execution and API safeguards:
 
-- JSON bodies are limited to 1 MiB; unknown fields and trailing JSON values are rejected with `400`.
+- JSON bodies are limited to 1 MiB; unknown fields and trailing JSON values are rejected with `400`. The HTTP server bounds headers to 16 KiB, header reads to 5 seconds, complete request reads to 10 seconds, keep-alive idle time to 60 seconds, and response writes to the synchronous submit budget plus response overhead.
 - Every response includes an `X-Request-ID`; valid client-supplied IDs are preserved. API errors use `{ "error": { "code", "message", "requestId" } }`.
 - Compiler and runtime stdout/stderr are each capped at 64 KiB. Exceeding the cap cancels execution and returns `output_limit_exceeded`.
-- Compile containers run without network access and with bounded CPU, memory, PIDs, filesystem access, and an unprivileged user. Runtime sandboxes use the shared image with similar restrictions.
+- Compile containers run without network access and with bounded CPU, memory, PIDs, file sizes, compiler output/artifact size, and an unprivileged user. Runtime sandboxes use the shared image with similar restrictions. Testcases restart and restore the sandbox between cases so one case cannot reuse mutable filesystem or process state from another.
 - Reusable sandboxes are checked after startup and restart. Failed reset or readiness checks cause replacement.
 - Authentication and per-user rate limiting are deferred because the service does not yet have a user/account model.
 
@@ -147,13 +149,7 @@ mkdir -p .yexjudge-workspaces
 docker compose up --build
 ```
 
-Compose publishes PostgreSQL on host port `5433` by default to avoid conflicts with a host database on `5432`. Change it with `POSTGRES_HOST_PORT`, for example:
-
-```bash
-POSTGRES_HOST_PORT=55432 docker compose up --build
-```
-
-The application container connects to PostgreSQL internally at `postgres:5432`. It mounts the Docker socket because YexJudge launches isolated sibling compile/runtime containers. This is intended for trusted local development, not an untrusted multi-tenant deployment. The project directory is mounted at the same absolute path inside the app container so the host Docker daemon can resolve workspace bind mounts.
+Compose does not publish a PostgreSQL host port; the app connects privately over the Compose network at `postgres:5432`. The API is published only on `127.0.0.1:8080` (override the host port with `API_HOST_PORT`). Compose mounts the Docker socket because YexJudge launches sibling compile/runtime containers. This all-in-one setup is for local development only, not an untrusted multi-tenant deployment. The project directory is mounted at the same absolute path inside the app container so the host Docker daemon can resolve workspace bind mounts.
 
 Stop the deployment with:
 
