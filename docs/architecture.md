@@ -177,7 +177,7 @@ PostgreSQL is both the durable submission store and the queue:
 - exhausted attempts become failed infrastructure results
 - completed judge verdicts remain `finished`
 
-The schema baseline and numbered migrations are embedded into the server and applied automatically during startup. Migration application uses an advisory lock so concurrent server starts do not apply the same migration simultaneously.
+The store and queue use a pgx v5 connection pool and sqlc-generated typed queries from `db/queries`, generated into `internal/dbquery`. The embedded schema baseline and numbered migrations are applied automatically at startup using native pgx transactions; an advisory lock prevents concurrent server starts from applying migrations simultaneously. Regenerate query code with the pinned sqlc version documented in [`development.md`](development.md).
 
 ## Compilation and Runtime Isolation
 

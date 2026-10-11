@@ -2,7 +2,6 @@ package db
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"os"
 	"sync"
@@ -10,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 var migrationTestSchemaID atomic.Uint64
@@ -27,45 +26,49 @@ func newMigrationTestSchema(t *testing.T) *migrationTestSchema {
 		t.Skip("YEXJUDGE_TEST_DATABASE_URL is not set")
 	}
 
-	admin, err := sql.Open("pgx", url)
+	admin, err := pgxpool.New(context.Background(), url)
 	if err != nil {
 		t.Fatalf("open test database: %v", err)
 	}
-	t.Cleanup(func() { _ = admin.Close() })
-	if err := admin.Ping(); err != nil {
+	t.Cleanup(admin.Close)
+	if err := admin.Ping(context.Background()); err != nil {
 		t.Fatalf("ping test database: %v", err)
 	}
 
 	name := fmt.Sprintf("yexjudge_migrations_%d_%d", time.Now().UnixNano(), migrationTestSchemaID.Add(1))
 	quoted := `"` + name + `"`
-	if _, err := admin.Exec(`CREATE SCHEMA ` + quoted); err != nil {
+	if _, err := admin.Exec(context.Background(), `CREATE SCHEMA `+quoted); err != nil {
 		t.Fatalf("create disposable schema: %v", err)
 	}
 	t.Cleanup(func() {
-		_, _ = admin.Exec(`DROP SCHEMA ` + quoted + ` CASCADE`)
+		_, _ = admin.Exec(context.Background(), `DROP SCHEMA `+quoted+` CASCADE`)
 	})
 
 	return &migrationTestSchema{url: url, quoted: quoted}
 }
 
-func (s *migrationTestSchema) openDB(t *testing.T) *sql.DB {
+func (s *migrationTestSchema) openDB(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	database, err := sql.Open("pgx", s.url)
+	config, err := pgxpool.ParseConfig(s.url)
+	if err != nil {
+		t.Fatalf("parse schema database URL: %v", err)
+	}
+	config.MaxConns = 1
+	config.ConnConfig.RuntimeParams["search_path"] = s.quoted
+	database, err := pgxpool.NewWithConfig(context.Background(), config)
 	if err != nil {
 		t.Fatalf("open schema database: %v", err)
 	}
-	database.SetMaxOpenConns(1)
-	database.SetMaxIdleConns(1)
-	t.Cleanup(func() { _ = database.Close() })
-	if _, err := database.Exec(`SET search_path TO ` + s.quoted); err != nil {
-		t.Fatalf("set schema search path: %v", err)
+	t.Cleanup(database.Close)
+	if err := database.Ping(context.Background()); err != nil {
+		t.Fatalf("ping schema database: %v", err)
 	}
 	return database
 }
 
-func assertMigrationVersions(t *testing.T, database *sql.DB) {
+func assertMigrationVersions(t *testing.T, database *pgxpool.Pool) {
 	t.Helper()
-	rows, err := database.Query(`SELECT version FROM schema_migrations ORDER BY version`)
+	rows, err := database.Query(context.Background(), `SELECT version FROM schema_migrations ORDER BY version`)
 	if err != nil {
 		t.Fatalf("query migration versions: %v", err)
 	}
@@ -88,10 +91,10 @@ func assertMigrationVersions(t *testing.T, database *sql.DB) {
 	}
 }
 
-func assertIndexExists(t *testing.T, database *sql.DB, name string) {
+func assertIndexExists(t *testing.T, database *pgxpool.Pool, name string) {
 	t.Helper()
 	var exists bool
-	if err := database.QueryRow(`
+	if err := database.QueryRow(context.Background(), `
 		SELECT EXISTS (
 			SELECT 1 FROM pg_indexes
 			WHERE schemaname = current_schema() AND indexname = $1
@@ -115,7 +118,7 @@ func TestApplyFreshSchema(t *testing.T) {
 	}
 
 	var hasLeaseColumn bool
-	if err := database.QueryRow(`
+	if err := database.QueryRow(context.Background(), `
 		SELECT EXISTS (
 			SELECT 1 FROM information_schema.columns
 			WHERE table_schema = current_schema()
@@ -136,7 +139,7 @@ func TestApplyFreshSchema(t *testing.T) {
 func TestApplyUpgradesPreLeaseSchema(t *testing.T) {
 	schema := newMigrationTestSchema(t)
 	database := schema.openDB(t)
-	if _, err := database.Exec(`
+	if _, err := database.Exec(context.Background(), `
 		CREATE TABLE submissions (
 			id TEXT PRIMARY KEY,
 			status TEXT NOT NULL,
@@ -161,7 +164,7 @@ func TestApplyUpgradesPreLeaseSchema(t *testing.T) {
 
 	var attemptCount int
 	var startedAt, leaseExpiresAt, updatedAt time.Time
-	if err := database.QueryRow(`
+	if err := database.QueryRow(context.Background(), `
 		SELECT attempt_count, started_at, lease_expires_at, updated_at
 		FROM submissions WHERE id = 'legacy-running'`).Scan(
 		&attemptCount, &startedAt, &leaseExpiresAt, &updatedAt); err != nil {
@@ -184,14 +187,14 @@ func TestApplyUpgradesPreLeaseSchema(t *testing.T) {
 
 func TestApplySerializesConcurrentBootstrap(t *testing.T) {
 	schema := newMigrationTestSchema(t)
-	databases := []*sql.DB{schema.openDB(t), schema.openDB(t)}
+	databases := []*pgxpool.Pool{schema.openDB(t), schema.openDB(t)}
 
 	start := make(chan struct{})
 	errors := make(chan error, len(databases))
 	var wait sync.WaitGroup
 	for _, database := range databases {
 		wait.Add(1)
-		go func(database *sql.DB) {
+		go func(database *pgxpool.Pool) {
 			defer wait.Done()
 			<-start
 			errors <- Apply(context.Background(), database)

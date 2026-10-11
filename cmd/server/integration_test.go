@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -19,7 +18,7 @@ import (
 	schema "yexjudge/db"
 	"yexjudge/internal/judge"
 
-	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestAPIIntegration(t *testing.T) {
@@ -63,28 +62,28 @@ func TestAPIIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	db, err := sql.Open("pgx", databaseURL)
+	db, err := pgxpool.New(context.Background(), databaseURL)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := schema.Apply(context.Background(), db); err != nil {
-		_ = db.Close()
+		db.Close()
 		t.Fatalf("apply database migrations: %v", err)
 	}
-	if _, err := db.Exec(`
+	if _, err := db.Exec(context.Background(), `
 		INSERT INTO submissions
 		(id, status, job, attempt_count, started_at, lease_expires_at, failure_message)
 		VALUES ($1, $2, $3, 1, NOW() - INTERVAL '2 minutes', NOW() - INTERVAL '1 second', $4)
 		on conflict (id) do nothing`, staleID, judge.SubmissionRunning, staleJobJSON, "test worker interrupted"); err != nil {
-		_ = db.Close()
+		db.Close()
 		t.Fatal(err)
 	}
-	_ = db.Close()
+	db.Close()
 	t.Cleanup(func() {
-		cleanupDB, openErr := sql.Open("pgx", databaseURL)
+		cleanupDB, openErr := pgxpool.New(context.Background(), databaseURL)
 		if openErr == nil {
-			_, _ = cleanupDB.Exec(`DELETE FROM submissions WHERE id = $1`, staleID)
-			_ = cleanupDB.Close()
+			_, _ = cleanupDB.Exec(context.Background(), `DELETE FROM submissions WHERE id = $1`, staleID)
+			cleanupDB.Close()
 		}
 	})
 
@@ -171,13 +170,13 @@ func TestAPIIntegration(t *testing.T) {
 
 	var submissionIDs []string
 	t.Cleanup(func() {
-		db, err := sql.Open("pgx", databaseURL)
+		db, err := pgxpool.New(context.Background(), databaseURL)
 		if err != nil {
 			return
 		}
 		defer db.Close()
 		for _, id := range submissionIDs {
-			_, _ = db.Exec(`DELETE FROM submissions WHERE id = $1`, id)
+			_, _ = db.Exec(context.Background(), `DELETE FROM submissions WHERE id = $1`, id)
 		}
 	})
 

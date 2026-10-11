@@ -16,6 +16,15 @@ Format Go code with:
 gofmt -w cmd internal
 ```
 
+## PostgreSQL query generation
+
+The SQL source of truth is in `db/queries`, and sqlc-generated pgx queries live in `internal/dbquery`. Do not edit generated files directly. Install the pinned generator and regenerate after changing query sources or schema migrations:
+
+```bash
+go install github.com/sqlc-dev/sqlc/cmd/sqlc@v1.30.0
+sqlc generate -f sqlc.yaml
+```
+
 ## Integration tests
 
 PostgreSQL integration tests are opt-in. The database must be available; migrations/schema are normally applied by server startup. Set `YEXJUDGE_TEST_DATABASE_URL` to enable the tests:

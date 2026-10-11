@@ -14,7 +14,9 @@ func TestPostgresAdmissionEnforcesDurableQueueLimit(t *testing.T) {
 	store := NewPostgresSubmissionStoreWithQueueLimit(db, 1)
 	firstID := fmt.Sprintf("admission-first-%d", time.Now().UnixNano())
 	secondID := fmt.Sprintf("admission-second-%d", time.Now().UnixNano())
-	t.Cleanup(func() { _, _ = db.Exec(`DELETE FROM submissions WHERE id IN ($1, $2)`, firstID, secondID) })
+	t.Cleanup(func() {
+		_, _ = db.Exec(context.Background(), `DELETE FROM submissions WHERE id IN ($1, $2)`, firstID, secondID)
+	})
 
 	if err := store.SaveAdmitted(context.Background(), integrationSubmission(firstID)); err != nil {
 		t.Fatalf("first SaveAdmitted() error = %v", err)
@@ -31,7 +33,9 @@ func TestPostgresAdmissionSerializesConcurrentRequests(t *testing.T) {
 		fmt.Sprintf("admission-race-a-%d", time.Now().UnixNano()),
 		fmt.Sprintf("admission-race-b-%d", time.Now().UnixNano()),
 	}
-	t.Cleanup(func() { _, _ = db.Exec(`DELETE FROM submissions WHERE id IN ($1, $2)`, ids[0], ids[1]) })
+	t.Cleanup(func() {
+		_, _ = db.Exec(context.Background(), `DELETE FROM submissions WHERE id IN ($1, $2)`, ids[0], ids[1])
+	})
 
 	start := make(chan struct{})
 	results := make(chan error, len(ids))
@@ -69,7 +73,7 @@ func TestPostgresRunningUpdatePreservesRenewedLease(t *testing.T) {
 	db := openIntegrationDB(t)
 	store := NewPostgresSubmissionStore(db)
 	id := fmt.Sprintf("lease-monotonic-%d", time.Now().UnixNano())
-	t.Cleanup(func() { _, _ = db.Exec(`DELETE FROM submissions WHERE id = $1`, id) })
+	t.Cleanup(func() { _, _ = db.Exec(context.Background(), `DELETE FROM submissions WHERE id = $1`, id) })
 	if err := store.Save(integrationSubmission(id)); err != nil {
 		t.Fatalf("Save() error = %v", err)
 	}
@@ -89,7 +93,7 @@ func TestPostgresRunningUpdatePreservesRenewedLease(t *testing.T) {
 		t.Fatalf("RenewLease() error = %v", err)
 	}
 	var renewed time.Time
-	if err := db.QueryRow(`SELECT lease_expires_at FROM submissions WHERE id = $1`, id).Scan(&renewed); err != nil {
+	if err := db.QueryRow(context.Background(), `SELECT lease_expires_at FROM submissions WHERE id = $1`, id).Scan(&renewed); err != nil {
 		t.Fatal(err)
 	}
 	if renewed.Before(oldLease) {
@@ -99,7 +103,7 @@ func TestPostgresRunningUpdatePreservesRenewedLease(t *testing.T) {
 		t.Fatalf("Update(stale running submission) error = %v", err)
 	}
 	var afterUpdate time.Time
-	if err := db.QueryRow(`SELECT lease_expires_at FROM submissions WHERE id = $1`, id).Scan(&afterUpdate); err != nil {
+	if err := db.QueryRow(context.Background(), `SELECT lease_expires_at FROM submissions WHERE id = $1`, id).Scan(&afterUpdate); err != nil {
 		t.Fatal(err)
 	}
 	if afterUpdate.Before(renewed) {

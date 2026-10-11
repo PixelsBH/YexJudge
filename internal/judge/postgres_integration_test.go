@@ -2,32 +2,31 @@ package judge
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"os"
 	"sync"
 	"testing"
 	"time"
 
-	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func openIntegrationDB(t *testing.T) *sql.DB {
+func openIntegrationDB(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 	url := os.Getenv("YEXJUDGE_TEST_DATABASE_URL")
 	if url == "" {
 		t.Skip("YEXJUDGE_TEST_DATABASE_URL is not set")
 	}
 
-	db, err := sql.Open("pgx", url)
+	db, err := pgxpool.New(context.Background(), url)
 	if err != nil {
-		t.Fatalf("sql.Open() error = %v", err)
+		t.Fatalf("pgxpool.New() error = %v", err)
 	}
-	t.Cleanup(func() { _ = db.Close() })
-	if err := db.Ping(); err != nil {
+	t.Cleanup(db.Close)
+	if err := db.Ping(context.Background()); err != nil {
 		t.Fatalf("database ping error = %v", err)
 	}
-	if _, err := db.Exec(`
+	if _, err := db.Exec(context.Background(), `
 		CREATE TABLE IF NOT EXISTS submissions (
 			id TEXT PRIMARY KEY,
 			status TEXT NOT NULL,
@@ -68,7 +67,7 @@ func TestPostgresSubmissionStoreIntegration(t *testing.T) {
 	db := openIntegrationDB(t)
 	store := NewPostgresSubmissionStore(db)
 	id := fmt.Sprintf("integration-store-%d", time.Now().UnixNano())
-	t.Cleanup(func() { _, _ = db.Exec(`DELETE FROM submissions WHERE id = $1`, id) })
+	t.Cleanup(func() { _, _ = db.Exec(context.Background(), `DELETE FROM submissions WHERE id = $1`, id) })
 
 	submission := integrationSubmission(id)
 	if err := store.Save(submission); err != nil {
@@ -127,7 +126,7 @@ func TestPostgresQueueClaimsEachSubmissionOnce(t *testing.T) {
 		}
 	}
 	t.Cleanup(func() {
-		_, _ = db.Exec(`DELETE FROM submissions WHERE id LIKE 'integration-queue-%'`)
+		_, _ = db.Exec(context.Background(), `DELETE FROM submissions WHERE id LIKE 'integration-queue-%'`)
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -178,7 +177,7 @@ func TestPostgresQueueRecoversExpiredAttempts(t *testing.T) {
 	retryID := fmt.Sprintf("integration-retry-%d", time.Now().UnixNano())
 	finalID := fmt.Sprintf("integration-final-%d", time.Now().UnixNano())
 	t.Cleanup(func() {
-		_, _ = db.Exec(`DELETE FROM submissions WHERE id IN ($1, $2)`, retryID, finalID)
+		_, _ = db.Exec(context.Background(), `DELETE FROM submissions WHERE id IN ($1, $2)`, retryID, finalID)
 	})
 	if err := store.Save(integrationSubmission(retryID)); err != nil {
 		t.Fatal(err)
@@ -186,14 +185,14 @@ func TestPostgresQueueRecoversExpiredAttempts(t *testing.T) {
 	if err := store.Save(integrationSubmission(finalID)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`
+	if _, err := db.Exec(context.Background(), `
 		UPDATE submissions
 		SET status = $2, attempt_count = $3, started_at = NOW() - INTERVAL '2 minutes',
 		    lease_expires_at = NOW() - INTERVAL '1 second'
 		WHERE id = $1`, retryID, SubmissionRunning, 1); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`
+	if _, err := db.Exec(context.Background(), `
 		UPDATE submissions
 		SET status = $2, attempt_count = $3, started_at = NOW() - INTERVAL '2 minutes',
 		    lease_expires_at = NOW() - INTERVAL '1 second'
@@ -238,13 +237,13 @@ func TestPostgresStoreRejectsStaleAttemptUpdate(t *testing.T) {
 	db := openIntegrationDB(t)
 	store := NewPostgresSubmissionStore(db)
 	id := fmt.Sprintf("integration-fence-%d", time.Now().UnixNano())
-	t.Cleanup(func() { _, _ = db.Exec(`DELETE FROM submissions WHERE id = $1`, id) })
+	t.Cleanup(func() { _, _ = db.Exec(context.Background(), `DELETE FROM submissions WHERE id = $1`, id) })
 
 	submission := integrationSubmission(id)
 	if err := store.Save(submission); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`UPDATE submissions SET attempt_count = 2 WHERE id = $1`, id); err != nil {
+	if _, err := db.Exec(context.Background(), `UPDATE submissions SET attempt_count = 2 WHERE id = $1`, id); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.Update(submission); err == nil {
@@ -259,14 +258,14 @@ func TestPostgresStoreRejectsUpdateAfterLeaseRecovery(t *testing.T) {
 	id := fmt.Sprintf("integration-recovered-fence-%d", time.Now().UnixNano())
 	t.Cleanup(func() {
 		queue.Close()
-		_, _ = db.Exec(`DELETE FROM submissions WHERE id = $1`, id)
+		_, _ = db.Exec(context.Background(), `DELETE FROM submissions WHERE id = $1`, id)
 	})
 
 	submission := integrationSubmission(id)
 	if err := store.Save(submission); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`
+	if _, err := db.Exec(context.Background(), `
 		UPDATE submissions
 		SET status = $2, attempt_count = 1, started_at = NOW() - INTERVAL '2 minutes',
 		    lease_expires_at = NOW() - INTERVAL '1 second'

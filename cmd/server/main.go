@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -20,7 +19,7 @@ import (
 	"yexjudge/internal/observability"
 	"yexjudge/internal/runner"
 
-	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 var (
@@ -396,40 +395,40 @@ func buildPersistence(cfg config) (judge.SubmissionStore, judge.SubmissionQueue,
 		return nil, nil, nil, fmt.Errorf("DATABASE_URL is required")
 	}
 
-	sqlDB, err := sql.Open("pgx", cfg.databaseURL)
+	poolCtx, cancelPool := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelPool()
+	pool, err := pgxpool.New(poolCtx, cfg.databaseURL)
 	if err != nil {
 		return nil, nil, nil, err
 	}
 
 	pingCtx, cancelPing := context.WithTimeout(context.Background(), 5*time.Second)
-	err = sqlDB.PingContext(pingCtx)
+	err = pool.Ping(pingCtx)
 	cancelPing()
 	if err != nil {
-		sqlDB.Close()
+		pool.Close()
 		return nil, nil, nil, err
 	}
 	migrationCtx, cancelMigration := context.WithTimeout(context.Background(), 10*time.Second)
-	if err := schema.Apply(migrationCtx, sqlDB); err != nil {
+	if err := schema.Apply(migrationCtx, pool); err != nil {
 		cancelMigration()
-		sqlDB.Close()
+		pool.Close()
 		return nil, nil, nil, err
 	}
 	cancelMigration()
 
 	log.Println("using Postgres store and queue")
 
-	store := judge.NewPostgresSubmissionStoreWithQueueLimit(sqlDB, cfg.maxQueued)
+	store := judge.NewPostgresSubmissionStoreWithQueueLimit(pool, cfg.maxQueued)
 	queue := judge.NewPostgresSubmissionQueueWithOptions(
-		sqlDB,
+		pool,
 		cfg.queuePoll,
 		cfg.queueLease,
 		cfg.queueMaxAttempts,
 	)
 
 	cleanup := func() {
-		if err := sqlDB.Close(); err != nil {
-			log.Println("failed to close database:", err)
-		}
+		pool.Close()
 	}
 
 	return store, queue, cleanup, nil

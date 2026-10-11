@@ -12,7 +12,7 @@ The current service provides:
 
 - asynchronous `POST /submissions` with `GET /submissions/{id}` result retrieval
 - synchronous `POST /submit` with bounded waiting
-- PostgreSQL-backed durable storage and queue claiming
+- PostgreSQL-backed durable storage and queue claiming through a native pgx pool and sqlc-generated typed queries
 - attempt-fenced leases, recovery, and bounded retries
 - fixed submission workers, dedicated compile workers, and reusable runtime sandboxes
 - restricted disposable compilation and bounded execution output
@@ -56,39 +56,7 @@ PostgreSQL       Container runner
 - The deployed sandbox configuration retains the tested isolation and execution limits.
 - Dependency and image vulnerability checks are part of maintenance, and actionable findings are patched or have a documented update plan.
 
-## Future Work 2: Migrate from Docker to Podman
-
-Replace Docker completely with Podman for building and running YexJudge compile and runtime containers, local deployment, and project tooling.
-
-### Constraints
-
-- Preserve compile/runtime separation, disposable environments, sandbox reset and replacement, cancellation, and current resource/output limits.
-- Preserve or strengthen network, filesystem, capability, privilege, and process isolation; verify actual Podman behavior instead of assuming Docker API compatibility guarantees equivalent restrictions.
-- Remove Docker-specific runtime, build, Compose, test, and documentation dependencies once their Podman replacements are validated.
-
-### Definition of done
-
-- YexJudge builds and runs its compiler and runtime images and manages containers using Podman without requiring a Docker daemon, CLI, socket, or Docker Compose.
-- Integration tests cover compilation, execution, cleanup/reset, cancellation, and enforcement of sandbox limits under Podman.
-- Deployment files, scripts, setup instructions, and operational docs consistently use Podman; no Docker-only dependency remains in the supported workflow.
-
-## Future Work 3: PostgreSQL Queries with pgx and sqlc
-
-The current application uses pgx through `database/sql` and handwritten SQL. Move application query code to generated, typed sqlc methods backed by native pgx APIs while retaining PostgreSQL and the existing migration approach.
-
-### Constraints
-
-- Keep SQL query sources reviewable and sqlc generation reproducible.
-- Preserve claim uniqueness, lease fencing, recovery, transaction boundaries, and existing persistence behavior.
-- Keep schema migrations as ordered SQL migration files; sqlc generates typed query code but does not replace migration execution.
-
-### Definition of done
-
-- Queue/store queries and row mappings use sqlc-generated APIs backed by pgx; runtime PostgreSQL access, including migration/bootstrap paths, uses native pgx APIs without the `database/sql` adapter.
-- Generated code can be reproduced from checked-in configuration and SQL sources, and CI or validation detects stale generated output.
-- PostgreSQL integration tests continue to cover concurrent claims, leases, retries, and persistence behavior.
-
-## Future Work 4: Project Simplification and Memory Footprint
+## Future Work 2: Project Simplification and Memory Footprint
 
 Review the project for dead or redundant code, unnecessarily complex implementations, and high-cost data structures. Prefer the simplest implementation that preserves current contracts, and use profiles and measurements to target memory reductions.
 

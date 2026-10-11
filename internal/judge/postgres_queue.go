@@ -2,11 +2,15 @@ package judge
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"yexjudge/internal/dbquery"
 )
 
 const (
@@ -29,7 +33,8 @@ type SubmissionQueue interface {
 }
 
 type PostgresSubmissionQueue struct {
-	db            *sql.DB
+	db            *pgxpool.Pool
+	queries       *dbquery.Queries
 	pollInterval  time.Duration
 	leaseDuration time.Duration
 	maxAttempts   int
@@ -37,7 +42,7 @@ type PostgresSubmissionQueue struct {
 	closed        chan struct{}
 }
 
-func NewPostgresSubmissionQueue(db *sql.DB, pollInterval time.Duration) *PostgresSubmissionQueue {
+func NewPostgresSubmissionQueue(db *pgxpool.Pool, pollInterval time.Duration) *PostgresSubmissionQueue {
 	return NewPostgresSubmissionQueueWithOptions(
 		db,
 		pollInterval,
@@ -47,7 +52,7 @@ func NewPostgresSubmissionQueue(db *sql.DB, pollInterval time.Duration) *Postgre
 }
 
 func NewPostgresSubmissionQueueWithOptions(
-	db *sql.DB,
+	db *pgxpool.Pool,
 	pollInterval, leaseDuration time.Duration,
 	maxAttempts int,
 ) *PostgresSubmissionQueue {
@@ -62,6 +67,7 @@ func NewPostgresSubmissionQueueWithOptions(
 	}
 	return &PostgresSubmissionQueue{
 		db:            db,
+		queries:       dbquery.New(db),
 		pollInterval:  pollInterval,
 		leaseDuration: leaseDuration,
 		maxAttempts:   maxAttempts,
@@ -116,24 +122,12 @@ func (q *PostgresSubmissionQueue) Dequeue(ctx context.Context) (SubmissionClaim,
 func (q *PostgresSubmissionQueue) RenewLease(ctx context.Context, claim SubmissionClaim) error {
 	opCtx, cancel := context.WithTimeout(ctx, databaseOperationTimeout)
 	defer cancel()
-	result, err := q.db.ExecContext(
-		opCtx,
-		`UPDATE submissions
-		 SET lease_expires_at = GREATEST(lease_expires_at, NOW() + $3::interval),
-		     updated_at = NOW()
-		 WHERE id = $1
-		   AND status = $2
-		   AND attempt_count = $4
-		   AND lease_expires_at > NOW()`,
-		claim.ID,
-		SubmissionRunning,
-		leaseInterval(q.leaseDuration),
-		claim.Attempt,
-	)
-	if err != nil {
-		return err
-	}
-	rows, err := result.RowsAffected()
+	rows, err := q.queries.RenewSubmissionLease(opCtx, dbquery.RenewSubmissionLeaseParams{
+		LeaseSeconds: q.leaseDuration.Seconds(),
+		ID:           claim.ID,
+		Status:       string(SubmissionRunning),
+		AttemptCount: int32(claim.Attempt),
+	})
 	if err != nil {
 		return err
 	}
@@ -146,96 +140,52 @@ func (q *PostgresSubmissionQueue) RenewLease(ctx context.Context, claim Submissi
 func (q *PostgresSubmissionQueue) RecoverExpired(ctx context.Context) (int, error) {
 	opCtx, cancel := context.WithTimeout(ctx, databaseOperationTimeout)
 	defer cancel()
-	tx, err := q.db.BeginTx(opCtx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
+	tx, err := q.db.BeginTx(opCtx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return 0, err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback(context.Background()) }()
 
-	rows, err := tx.QueryContext(
-		opCtx,
-		`SELECT id, attempt_count
-		 FROM submissions
-		 WHERE status = $1
-		   AND lease_expires_at IS NOT NULL
-		   AND lease_expires_at <= NOW()
-		 ORDER BY lease_expires_at, created_at
-		 FOR UPDATE SKIP LOCKED`,
-		SubmissionRunning,
-	)
+	queries := q.queries.WithTx(tx)
+	expired, err := queries.LockExpiredSubmissions(opCtx, string(SubmissionRunning))
 	if err != nil {
 		return 0, err
 	}
-	defer rows.Close()
-
-	type expiredAttempt struct {
-		id      string
-		attempt int
-	}
-	expired := make([]expiredAttempt, 0)
-	for rows.Next() {
-		var item expiredAttempt
-		if err := rows.Scan(&item.id, &item.attempt); err != nil {
-			return 0, err
-		}
-		expired = append(expired, item)
-	}
-	if err := rows.Err(); err != nil {
-		return 0, err
-	}
-	if err := rows.Close(); err != nil {
-		return 0, err
-	}
-
 	for _, item := range expired {
-		id := item.id
-		attempt := item.attempt
+		attempt := int(item.AttemptCount)
 		message := fmt.Sprintf("worker lease expired on attempt %d", attempt)
+		var rows int64
 		if attempt < q.maxAttempts {
 			message = fmt.Sprintf("%s; retrying attempt %d of %d", message, attempt+1, q.maxAttempts)
-			if _, err := tx.ExecContext(
-				opCtx,
-				`UPDATE submissions
-				 SET status = $2,
-				     result = NULL,
-				     started_at = NULL,
-				     lease_expires_at = NULL,
-				     failure_message = $3,
-				     updated_at = NOW()
-				 WHERE id = $1`,
-				id,
-				SubmissionQueued,
-				message,
-			); err != nil {
-				return 0, err
-			}
+			rows, err = queries.RequeueExpiredSubmission(opCtx, dbquery.RequeueExpiredSubmissionParams{
+				Status:         string(SubmissionQueued),
+				FailureMessage: nullableText(message),
+				ID:             item.ID,
+			})
 		} else {
+			message = fmt.Sprintf("%s; retry limit %d reached", message, q.maxAttempts)
 			resultJSON, marshalErr := json.Marshal(Result{
 				Status:       InfrastructureError,
-				ErrorMessage: fmt.Sprintf("%s; retry limit %d reached", message, q.maxAttempts),
+				ErrorMessage: message,
 			})
 			if marshalErr != nil {
 				return 0, marshalErr
 			}
-			if _, err := tx.ExecContext(
-				opCtx,
-				`UPDATE submissions
-				 SET status = $2,
-				     result = $3,
-				     lease_expires_at = NULL,
-				     failure_message = $4,
-				     updated_at = NOW()
-				 WHERE id = $1`,
-				id,
-				SubmissionFailed,
-				resultJSON,
-				message,
-			); err != nil {
-				return 0, err
-			}
+			rows, err = queries.FailExpiredSubmission(opCtx, dbquery.FailExpiredSubmissionParams{
+				Status:         string(SubmissionFailed),
+				Result:         resultJSON,
+				FailureMessage: nullableText(message),
+				ID:             item.ID,
+			})
+		}
+		if err != nil {
+			return 0, err
+		}
+		if rows != 1 {
+			return 0, fmt.Errorf("locked expired submission %q was not updated", item.ID)
 		}
 	}
-	if err := tx.Commit(); err != nil {
+	if err := tx.Commit(opCtx); err != nil {
 		return 0, err
 	}
 	return len(expired), nil
@@ -250,48 +200,16 @@ func (q *PostgresSubmissionQueue) Close() {
 func (q *PostgresSubmissionQueue) claimNextSubmission(ctx context.Context) (SubmissionClaim, bool, error) {
 	opCtx, cancel := context.WithTimeout(ctx, databaseOperationTimeout)
 	defer cancel()
-	tx, err := q.db.BeginTx(opCtx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
-	if err != nil {
-		return SubmissionClaim{}, false, err
-	}
-	defer tx.Rollback()
-
-	var claim SubmissionClaim
-	err = tx.QueryRowContext(
-		opCtx,
-		`UPDATE submissions
-		 SET status = $1,
-		     attempt_count = attempt_count + 1,
-		     started_at = NOW(),
-		     lease_expires_at = NOW() + $3::interval,
-		     updated_at = NOW()
-		 WHERE id = (
-		     SELECT id
-		     FROM submissions
-		     WHERE status = $2
-		     ORDER BY created_at
-		     FOR UPDATE SKIP LOCKED
-		     LIMIT 1
-		 )
-		 RETURNING id, attempt_count`,
-		SubmissionRunning,
-		SubmissionQueued,
-		leaseInterval(q.leaseDuration),
-	).Scan(&claim.ID, &claim.Attempt)
-	if err == sql.ErrNoRows {
+	row, err := q.queries.ClaimNextSubmission(opCtx, dbquery.ClaimNextSubmissionParams{
+		RunningStatus: string(SubmissionRunning),
+		LeaseSeconds:  q.leaseDuration.Seconds(),
+		QueuedStatus:  string(SubmissionQueued),
+	})
+	if err == pgx.ErrNoRows {
 		return SubmissionClaim{}, false, nil
 	}
 	if err != nil {
 		return SubmissionClaim{}, false, err
 	}
-
-	if err := tx.Commit(); err != nil {
-		return SubmissionClaim{}, false, err
-	}
-
-	return claim, true, nil
-}
-
-func leaseInterval(duration time.Duration) string {
-	return fmt.Sprintf("%f seconds", duration.Seconds())
+	return SubmissionClaim{ID: row.ID, Attempt: int(row.AttemptCount)}, true, nil
 }
