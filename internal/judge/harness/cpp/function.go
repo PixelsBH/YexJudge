@@ -22,6 +22,8 @@ func NewFunctionGenerator(registry *types.Registry) *FunctionGenerator {
 	return &FunctionGenerator{registry: registry}
 }
 
+func (g *FunctionGenerator) Language() string { return "cpp" }
+
 func (g *FunctionGenerator) Mode() harness.ExecutionMode {
 	return harness.ModeFunction
 }

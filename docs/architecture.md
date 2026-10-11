@@ -6,7 +6,7 @@ YexJudge is an asynchronous online judge and language runtime written in Go. It 
 
 The implementation is intentionally driven by execution semantics and data types rather than algorithm categories or individual problem names. A new ordinary problem should require only metadata and test cases; YexJudge code changes are reserved for genuinely new execution modes or runtime data types.
 
-The completed system is C++-first for metadata-driven LeetCode-style submissions while retaining conventional stdin/stdout support for C, C++, Python, Go, and Java.
+The completed system is C++-first for metadata-driven LeetCode-style submissions, with Python Function/Class support, and conventional stdin/stdout support for C, C++, and Python.
 
 ## System Flow
 
@@ -22,7 +22,7 @@ flowchart TD
     Worker --> Service[Judge service]
     Service --> Mode{Execution mode}
     Mode -->|stdin| Workspace[Create isolated workspace]
-    Mode -->|function/class| Harness[Generate metadata-driven C++ harness]
+    Mode -->|function/class| Harness[Generate language-specific metadata harness]
     Harness --> Workspace
     Workspace --> Compile[Dedicated compile-worker pool]
     Compile -->|Fresh restricted container| Artifact[Compiled artifact]
@@ -83,7 +83,7 @@ Execution mode is a first-class contract independent of language backend:
 - **Class Mode** — construct a user class and execute a metadata-defined sequence of operations.
 - **Interactive, SQL, and Shell modes** — reserved for future contracts and separate runtimes.
 
-Function and Class Mode currently have a C++ backend. The shared mode, observation, validation, and comparison boundaries are designed so another backend does not require changes to queueing, workers, sandboxes, or verdict storage.
+Function and Class Mode have separate C++ and Python backends selected by language and mode. Both use the shared execution, observation, validation, comparison, queue, worker, sandbox, and verdict contracts.
 
 ## C++ Metadata-Driven Harness Runtime
 
@@ -157,6 +157,12 @@ Class Mode accepts metadata for:
 - operation arguments and expected observations
 
 The generated driver constructs the class once and executes the operation sequence. This already supports the execution shape used by Min Stack, LRU Cache, Trie, Browser History, and similar stateful designs without naming or hardcoding those problems.
+
+### Python Function and Class backends
+
+Python generators are selected independently by the `(language, mode)` registry. Function Mode expects user source to define `class Solution` and calls the metadata-named method positionally; Class Mode constructs the metadata-named class and runs its declared operations positionally. Python annotations are optional because recursive metadata controls decoding and serialization.
+
+The backend maps the shared scalar, `vector<T>`, and `optional<T>` metadata vocabulary to native Python values. Lists remain mutable so declared parameter observations capture mutations; prefix observations use the integer return value as a slice length. Hidden list, tree, random-list, and graph runtime objects use the same JSON shapes as C++, and `same_as`/`disjoint` postconditions inspect Python object identity without serializing addresses. Method stdout is captured separately from the generated JSON result.
 
 ## Queue, Recovery, and Persistence
 
@@ -277,15 +283,7 @@ curl -i http://localhost:8080/ready
 
 ## Supported Languages and Scope
 
-Conventional stdin/stdout execution is available for:
-
-- C++
-- C
-- Python
-- Go
-- Java
-
-Metadata-driven C++ Function Mode and Class Mode are the active LeetCode-style implementations. Python and Java Function/Class backends are deliberately deferred. Go remains stdin/stdout-only while its long-term product status is evaluated.
+Conventional stdin/stdout execution is available for C, C++, and Python. Metadata-driven Function Mode and Class Mode are available for C++ and Python.
 
 ## Validation and Test Coverage
 
@@ -298,7 +296,7 @@ The repository includes:
 - compile-worker cancellation, concurrency, and shutdown tests
 - sandbox reset, replacement, readiness, and output-limit tests
 - Postgres store, claim uniqueness, lease recovery, and stale-attempt tests
-- API/Docker integration tests covering readiness, async polling, all current stdin languages, C++ Function/Class Mode, timeouts, and compilation errors
+- API/Docker integration tests covering readiness, async polling, all current stdin languages, C++ and Python Function/Class Mode, timeouts, and compilation errors
 - an opt-in Docker compile benchmark
 - `scripts/load-test.sh` for repeatable asynchronous admission measurements
 
@@ -318,9 +316,6 @@ The completed architecture intentionally does not include:
 
 - algorithm-specific judge logic
 - problem-specific harnesses
-- Python or Java Function/Class generation
-- Go Function/Class generation
-- adaptive capacity
 - interactive, SQL, or Shell runtimes
 - authentication or per-user rate limiting, because there is no user/account model yet
 

@@ -33,12 +33,6 @@ func TestAPIIntegration(t *testing.T) {
 	if err := inspectDockerImage("gcc:13"); err != nil {
 		t.Skipf("C/C++ compile Docker image is unavailable: %v", err)
 	}
-	if err := inspectDockerImage("golang:1.24-alpine"); err != nil {
-		t.Skipf("Go compile Docker image is unavailable: %v", err)
-	}
-	if err := inspectDockerImage("eclipse-temurin:17-jdk"); err != nil {
-		t.Skipf("Java compile Docker image is unavailable: %v", err)
-	}
 
 	root, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
@@ -204,7 +198,7 @@ func TestAPIIntegration(t *testing.T) {
 		}
 	})
 
-	t.Run("all stdin languages", func(t *testing.T) {
+	t.Run("supported stdin languages", func(t *testing.T) {
 		tests := []struct {
 			name     string
 			language string
@@ -213,8 +207,6 @@ func TestAPIIntegration(t *testing.T) {
 			{name: "c", language: "c", source: "#include <stdio.h>\nint main(void) { printf(\"5\\n\"); return 0; }"},
 			{name: "cpp", language: "cpp", source: "#include <iostream>\nint main() { std::cout << 5 << '\\n'; }"},
 			{name: "python", language: "python", source: "print(2 + 3)"},
-			{name: "go", language: "go", source: "package main\nimport \"fmt\"\nfunc main() { fmt.Println(5) }"},
-			{name: "java", language: "java", source: "public class Main { public static void main(String[] args) { System.out.println(5); } }"},
 		}
 		for _, test := range tests {
 			t.Run(test.name, func(t *testing.T) {
@@ -302,6 +294,67 @@ func TestAPIIntegration(t *testing.T) {
 		decodeJSON(t, response, &result)
 		if result.Status != judge.SubmissionFinished || result.Result == nil || result.Result.Status != judge.Accepted {
 			t.Fatalf("class-mode response = status=%s result=%+v, want finished accepted; log:\n%s", result.Status, result.Result, serverLog.String())
+		}
+		submissionIDs = append(submissionIDs, result.ID)
+	})
+
+	t.Run("Python function mode", func(t *testing.T) {
+		id := postSubmission(t, client, baseURL+"/submissions", map[string]any{
+			"language": "python",
+			"sourceCode": `class Solution:
+    def compact(self, values):
+        values[0] = 6
+        return 1`,
+			"function": map[string]any{
+				"name": "compact", "returnType": "int",
+				"params": []map[string]any{{"name": "values", "type": "vector<int>&"}},
+				"observations": []map[string]any{
+					{"kind": "return"},
+					{"kind": "parameter", "parameter": 0, "view": "prefix", "lengthFromReturn": true},
+				},
+			},
+			"testCases": []map[string]any{{
+				"id": 1, "args": []any{[]int{1, 2}},
+				"expected": map[string]any{"return": 1, "parameter": map[string]any{"0": []int{6}}},
+			}},
+			"limits": map[string]any{"timeLimitMs": 1000, "memoryLimitMb": 128},
+		})
+		submissionIDs = append(submissionIDs, id)
+		result := waitForIntegrationSubmission(t, client, baseURL+"/submissions/"+id, &serverLog)
+		if result.Status != judge.SubmissionFinished || result.Result == nil || result.Result.Status != judge.Accepted {
+			t.Fatalf("Python function result = status=%s result=%+v, want finished accepted; log:\n%s", result.Status, result.Result, serverLog.String())
+		}
+	})
+
+	t.Run("Python class mode", func(t *testing.T) {
+		response := postAndDecode(t, client, baseURL+"/submit", map[string]any{
+			"language": "python", "mode": "class",
+			"sourceCode": `class Counter:
+    def __init__(self, initial):
+        self.value = initial
+    def add(self, amount):
+        self.value += amount
+    def get(self):
+        return self.value`,
+			"class": map[string]any{
+				"name":        "Counter",
+				"constructor": map[string]any{"params": []map[string]any{{"name": "initial", "type": "int"}}},
+				"operations": []map[string]any{
+					{"name": "add", "returnType": "void", "params": []map[string]any{{"name": "amount", "type": "int"}}},
+					{"name": "get", "returnType": "int", "params": []map[string]any{}},
+				},
+			},
+			"testCases": []map[string]any{{
+				"id": 1, "constructorArgs": []any{3},
+				"operations": []map[string]any{{"name": "add", "args": []any{4}}, {"name": "get", "args": []any{}}},
+				"expected":   []any{nil, 7},
+			}},
+			"limits": map[string]any{"timeLimitMs": 1000, "memoryLimitMb": 128},
+		})
+		var result judge.SubmissionResponse
+		decodeJSON(t, response, &result)
+		if result.Status != judge.SubmissionFinished || result.Result == nil || result.Result.Status != judge.Accepted {
+			t.Fatalf("Python class response = status=%s result=%+v, want finished accepted; log:\n%s", result.Status, result.Result, serverLog.String())
 		}
 		submissionIDs = append(submissionIDs, result.ID)
 	})

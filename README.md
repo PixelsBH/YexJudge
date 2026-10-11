@@ -1,6 +1,6 @@
 # YexJudge
 
-YexJudge is a small online judge service written in Go. It accepts code submissions, queues them, processes them with background workers, and runs test cases inside reusable Docker sandboxes. It uses PostgreSQL for durable submission storage and supports conventional stdin/stdout submissions in C, C++, Python, Go, and Java, along with metadata-driven C++ Function and Class modes.
+YexJudge is a small online judge service written in Go. It accepts code submissions, queues them, processes them with background workers, and runs test cases inside reusable Docker sandboxes. It uses PostgreSQL for durable submission storage and supports conventional stdin/stdout submissions in C, C++, and Python, along with metadata-driven C++ and Python Function and Class modes.
 
 ## Installation
 

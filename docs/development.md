@@ -34,7 +34,7 @@ YEXJUDGE_TEST_DATABASE_URL='postgres://postgres@localhost:5432/yexjudge?sslmode=
   go test ./cmd/server -run TestAPIIntegration -count=3 -v
 ```
 
-These integration tests are skipped when `YEXJUDGE_TEST_DATABASE_URL` is unset, so `go test ./...` remains self-contained. The API test uses one worker and one runtime sandbox. Cold C/C++, Go, and Java compiler images/build caches can make the first submission take tens of seconds.
+These integration tests are skipped when `YEXJUDGE_TEST_DATABASE_URL` is unset, so `go test ./...` remains self-contained. The API test uses one worker and one runtime sandbox. Cold C/C++ compiler images/build caches can make the first compiled submission take tens of seconds; Python submissions run directly in the runtime image.
 
 ## Load testing
 

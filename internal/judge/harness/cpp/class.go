@@ -26,6 +26,8 @@ func NewClassGenerator(registry *types.Registry) *ClassGenerator {
 	return &ClassGenerator{registry: registry}
 }
 
+func (g *ClassGenerator) Language() string { return "cpp" }
+
 func (g *ClassGenerator) Mode() harness.ExecutionMode { return harness.ModeClass }
 
 func (g *ClassGenerator) GenerateMode(request harness.ModeRequest) (harness.GeneratedProgram, error) {

@@ -40,24 +40,30 @@ type GeneratedProgram struct {
 }
 
 type ModeGenerator interface {
+	Language() string
 	Mode() ExecutionMode
 	GenerateMode(ModeRequest) (GeneratedProgram, error)
 }
 
+type modeKey struct {
+	language string
+	mode     ExecutionMode
+}
+
 type ModeRegistry struct {
-	generators map[ExecutionMode]ModeGenerator
+	generators map[modeKey]ModeGenerator
 }
 
 func NewModeRegistry(generators ...ModeGenerator) *ModeRegistry {
-	registry := &ModeRegistry{generators: make(map[ExecutionMode]ModeGenerator, len(generators))}
+	registry := &ModeRegistry{generators: make(map[modeKey]ModeGenerator, len(generators))}
 	for _, generator := range generators {
-		registry.generators[generator.Mode()] = generator
+		registry.generators[modeKey{language: generator.Language(), mode: generator.Mode()}] = generator
 	}
 	return registry
 }
 
-func (r *ModeRegistry) Get(mode ExecutionMode) (ModeGenerator, bool) {
-	generator, ok := r.generators[mode]
+func (r *ModeRegistry) Get(language string, mode ExecutionMode) (ModeGenerator, bool) {
+	generator, ok := r.generators[modeKey{language: language, mode: mode}]
 	return generator, ok
 }
 

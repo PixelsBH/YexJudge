@@ -7,7 +7,7 @@ YexJudge exposes an asynchronous submission API and a bounded synchronous conven
 - `POST /submit` creates a submission and waits up to `SUBMIT_TIMEOUT_MS` (10 seconds by default). If it times out, it returns `202` with the submission ID and a `Location` header.
 - `POST /judge` is a compatibility alias for submission creation.
 
-The main submission path is C++. Conventional stdin/stdout submissions are also supported for C, Python, Go, and Java. Metadata-driven Function and Class modes currently support C++ only.
+The service supports conventional stdin/stdout submissions for C, C++, and Python. Metadata-driven Function and Class modes are available in C++ and Python.
 
 ## Conventional stdin/stdout submissions
 
@@ -222,14 +222,54 @@ Result statuses include `accepted`, `wrong_answer`, `time_limit_exceeded`, `runt
 
 Submissions are claimed with a lease. Expired attempts are retried up to `QUEUE_MAX_ATTEMPTS`, then recorded as failed with an infrastructure error. Recovery runs at startup and periodically so a crashed worker does not strand a submission in `running`.
 
-## Supported languages
+## Python Function and Class modes
 
-Use these `language` values for stdin/stdout mode:
+Python Function Mode uses a `class Solution` definition and calls the method named by `function.name` with decoded testcase arguments positionally. Type annotations are optional; metadata defines input and output types. Class Mode instantiates the metadata-named class and invokes each declared operation in order, also with positional arguments.
 
-- `c`
-- `cpp`
-- `python`
-- `go` (legacy stdin/stdout support)
-- `java`
+Python accepts the shared recursive metadata types `int`, `long long`, `double`, `bool`, `string`, `vector<T>`, and `optional<T>`. Python `vector<T>` values become mutable native lists, and mutation observations serialize the list after invocation. `view: "prefix"` uses the integer function return value as the observed list length. Method stdout is captured so it cannot corrupt the driver's JSON result.
 
-The LeetCode-style Function/Class system currently has a C++ backend only. C, Python, Go, and Java support conventional stdin/stdout submissions; Function/Class backends for other languages are not currently supported.
+The custom runtime types `ListNode*`, `TreeNode*`, `RandomListNode*`, `Node*`, and `GraphNode*` are provided to Python submissions. Their JSON input/output shapes match the C++ backend: linked lists and trees use arrays, random lists use `{ "values": [...], "random": [...] }`, and graphs use `{ "values": [...], "neighbors": [...] }`. `same_as` and `disjoint` postconditions are available for custom runtime objects; identity uses Python object identity and `disjoint` checks all objects reachable through the declared runtime structure. Raw identities are never serialized.
+
+Example Python Function Mode request:
+
+```json
+{
+  "language": "python",
+  "mode": "function",
+  "sourceCode": "class Solution:\\n    def maxValue(self, values):\\n        return max(values)",
+  "function": {
+    "name": "maxValue",
+    "returnType": "int",
+    "params": [{ "name": "values", "type": "vector<int>" }]
+  },
+  "testCases": [{ "id": 1, "args": [[1, 7, 3]], "expected": 7 }],
+  "limits": { "timeLimitMs": 1000, "memoryLimitMb": 128 }
+}
+```
+
+Python Class Mode uses the same constructor/operation contract as C++:
+
+```json
+{
+  "language": "python",
+  "mode": "class",
+  "sourceCode": "class Counter:\\n    def __init__(self, initial): self.value = initial\\n    def add(self, amount): self.value += amount\\n    def get(self): return self.value",
+  "class": {
+    "name": "Counter",
+    "constructor": { "params": [{ "name": "initial", "type": "int" }] },
+    "operations": [
+      { "name": "add", "returnType": "void", "params": [{ "name": "amount", "type": "int" }] },
+      { "name": "get", "returnType": "int", "params": [] }
+    ]
+  },
+  "testCases": [{
+    "id": 1,
+    "constructorArgs": [3],
+    "operations": [{ "name": "add", "args": [4] }, { "name": "get", "args": [] }],
+    "expected": [null, 7]
+  }],
+  "limits": { "timeLimitMs": 1000, "memoryLimitMb": 128 }
+}
+```
+
+Use these `language` values for stdin/stdout mode: `c`, `cpp`, and `python`. Function and Class modes support `cpp` and `python`.

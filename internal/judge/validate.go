@@ -8,6 +8,7 @@ import (
 
 	"yexjudge/internal/judge/harness"
 	functiontypes "yexjudge/internal/judge/harness/cpp/types"
+	"yexjudge/internal/judge/languages"
 )
 
 const (
@@ -15,9 +16,14 @@ const (
 	MaxMemoryLimitMb = 512
 )
 
+var supportedLanguages = languages.DefaultRegistry()
+
 func ValidateJob(job Job) error {
 	if job.Language == "" {
 		return fmt.Errorf("language is required")
+	}
+	if _, ok := supportedLanguages.Get(job.Language); !ok {
+		return fmt.Errorf("unsupported language %q", job.Language)
 	}
 
 	requestedMode := job.ExecutionMode()
@@ -74,8 +80,14 @@ func ValidateJob(job Job) error {
 		return validateFunctionJob(job)
 	}
 	if job.Class != nil {
+		if job.Language == "python" {
+			if _, err := generateModeProgram(job); err != nil {
+				return fmt.Errorf("class metadata: %w", err)
+			}
+			return nil
+		}
 		if job.Language != "cpp" {
-			return fmt.Errorf("class mode currently supports cpp only")
+			return fmt.Errorf("class mode supports cpp and python only")
 		}
 		if _, err := buildCppClassHarness(job); err != nil {
 			return fmt.Errorf("class metadata: %w", err)
@@ -97,8 +109,14 @@ func ValidateJob(job Job) error {
 }
 
 func validateFunctionJob(job Job) error {
+	if job.Language == "python" {
+		if _, err := generateModeProgram(job); err != nil {
+			return fmt.Errorf("function metadata: %w", err)
+		}
+		return nil
+	}
 	if job.Language != "cpp" {
-		return fmt.Errorf("function mode currently supports cpp only")
+		return fmt.Errorf("function mode supports cpp and python only")
 	}
 
 	if !isCppIdentifier(job.Function.Name) {

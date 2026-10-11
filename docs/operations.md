@@ -8,27 +8,20 @@ YexJudge requires Go, Docker, and PostgreSQL. Docker must be running, and the se
 docker ps
 ```
 
-YexJudge uses one reusable runtime sandbox image for C, C++, Go, Python, and Java. Build it from the project root:
+YexJudge uses one reusable runtime sandbox image for C, C++, and Python. Build it from the project root:
 
 ```bash
 docker build -t yexjudge-runtime:latest -f docker/runtime/Dockerfile .
 ```
 
-Compiled languages also use separate compiler images:
-
-- C and C++: `gcc:13`
-- Go: `golang:1.24-alpine`
-- Java: `eclipse-temurin:17-jdk`
+C and C++ use the `gcc:13` compiler image. Python runs directly in the runtime image.
 
 Pre-pulling them is optional, but avoids waiting on the first submission:
 
 ```bash
 docker pull gcc:13
-docker pull golang:1.24-alpine
-docker pull eclipse-temurin:17-jdk
 ```
 
-Python does not require a separate compile image.
 
 ## PostgreSQL
 
@@ -175,11 +168,11 @@ If Docker Compose is not recognized or reports `unknown flag: --build`:
 - Run the command from the project root, where `docker-compose.yml` is located.
 - On Debian/Ubuntu, install with `sudo apt-get install docker-compose-plugin`.
 
-If the first C, C++, Go, or Java submission is slow, Docker may be downloading the compiler image. Pre-pull the images listed above; a cold compiler/container setup can take tens of seconds.
+If the first C or C++ submission is slow, Docker may be downloading the compiler image. Pre-pull `gcc:13`; a cold compiler/container setup can take tens of seconds.
 
 If submissions remain queued, check server logs, worker startup, runtime sandbox creation, and (when using PostgreSQL) whether workers can update rows in the `submissions` table.
 
-If execution fails with missing commands, rebuild the runtime image and confirm it contains `python3` and Java runtime support.
+If execution fails with missing commands, rebuild the runtime image and confirm it contains `python3`.
 
 To inspect recent persisted submissions or a stored verdict:
 

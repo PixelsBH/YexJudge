@@ -4,6 +4,10 @@ type Registry struct {
 	specs map[string]Spec
 }
 
+func DefaultRegistry() *Registry {
+	return NewRegistry(C{}, Cpp{}, Python{})
+}
+
 func NewRegistry(specs ...Spec) *Registry {
 	m := make(map[string]Spec, len(specs))
 	for _, spec := range specs {

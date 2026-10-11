@@ -14,6 +14,11 @@ type FunctionSpec struct {
 	Params         []Parameter
 	Observations   []Observation
 	Postconditions []Postcondition
+	Comparison     *FunctionComparison
+}
+
+type FunctionComparison struct {
+	ReturnArrayOrder string
 }
 
 type ClassSpec struct {

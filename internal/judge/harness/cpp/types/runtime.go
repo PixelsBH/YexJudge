@@ -436,17 +436,30 @@ func canonicalGraphJSON(raw json.RawMessage) (string, error) {
 	if len(graph.Values) == 0 {
 		return "null", nil
 	}
-	values := make([]string, 0, len(graph.Values))
-	for _, value := range graph.Values {
-		canonical, _ := integerCanonical(32)(value)
-		values = append(values, canonical)
+
+	order := []int{0}
+	canonicalIndexes := map[int]int{0: 0}
+	for cursor := 0; cursor < len(order); cursor++ {
+		for _, rawNeighbor := range graph.Neighbors[order[cursor]] {
+			neighbor, _ := parseInteger(rawNeighbor, 32)
+			index := int(neighbor)
+			if _, exists := canonicalIndexes[index]; exists {
+				continue
+			}
+			canonicalIndexes[index] = len(order)
+			order = append(order, index)
+		}
 	}
-	rows := make([]string, 0, len(graph.Neighbors))
-	for _, neighbors := range graph.Neighbors {
-		indices := make([]string, 0, len(neighbors))
-		for _, neighbor := range neighbors {
-			index, _ := parseInteger(neighbor, 32)
-			indices = append(indices, fmt.Sprintf("%d", index))
+
+	values := make([]string, 0, len(order))
+	rows := make([]string, 0, len(order))
+	for _, originalIndex := range order {
+		canonical, _ := integerCanonical(32)(graph.Values[originalIndex])
+		values = append(values, canonical)
+		indices := make([]string, 0, len(graph.Neighbors[originalIndex]))
+		for _, rawNeighbor := range graph.Neighbors[originalIndex] {
+			neighbor, _ := parseInteger(rawNeighbor, 32)
+			indices = append(indices, fmt.Sprintf("%d", canonicalIndexes[int(neighbor)]))
 		}
 		rows = append(rows, "["+strings.Join(indices, ",")+"]")
 	}

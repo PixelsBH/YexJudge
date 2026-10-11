@@ -222,6 +222,9 @@ func TestCustomRuntimeAdaptersCanonicalizeValues(t *testing.T) {
 	if got, err := graph.CanonicalJSON(json.RawMessage(`{"values":[1,2],"neighbors":[[1],[0]]}`)); err != nil || got != `{"values":[1,2],"neighbors":[[1],[0]]}` {
 		t.Fatalf("graph canonical JSON = %q, error = %v", got, err)
 	}
+	if got, err := graph.CanonicalJSON(json.RawMessage(`{"values":[10,20,30],"neighbors":[[2,1],[0],[0]]}`)); err != nil || got != `{"values":[10,30,20],"neighbors":[[1,2],[0],[0]]}` {
+		t.Fatalf("graph canonical JSON did not normalize breadth-first node order: %q, error = %v", got, err)
+	}
 	if _, err := graph.CanonicalJSON(json.RawMessage(`{"values":[1,2,3],"neighbors":[[1],[0],[]]}`)); err == nil || !strings.Contains(err.Error(), "unreachable") {
 		t.Fatalf("graph accepted unreachable node: %v", err)
 	}

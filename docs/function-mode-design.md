@@ -36,17 +36,9 @@ YexJudge should support:
 
 The existing queue, worker, compiler, sandbox, and verdict pipeline should remain shared by all non-specialized modes.
 
-### Initial implementation scope
+### Implemented backend scope
 
-The first complete Function Mode implementation is intentionally C++ only. The contracts and orchestration are designed to be reusable, but each language requires its own source-generation and runtime-emission backend. We will not duplicate the core judge work for each language now.
-
-The near-term order is:
-
-1. complete C++ custom runtime types and C++ Class Mode
-2. stabilize the shared contracts and comparison behavior
-3. add Python and Java backends only after the C++ roadmap is complete and a concrete platform requirement exists
-
-The existing Go stdin/stdout backend is treated as a legacy compatibility path. No Go Function/Class backend is planned; whether the Go option should be removed is a separate product decision after the C++ roadmap.
+C++ and Python have separate Function and Class Mode backends behind the shared language-and-mode registry. They share request metadata, execution, validation, observation, comparison, and verdict contracts; generated source and runtime value handling remain language-specific. Conventional stdin/stdout mode is supported for C, C++, and Python.
 
 ## 2. Non-goals
 
@@ -104,7 +96,7 @@ A mode owns lifecycle semantics, not problem semantics.
 
 ### 3.2 Language backend
 
-The language backend knows how to emit code for C++, Java, Python, Go, and future languages. It does not know algorithm categories.
+The language backend knows how to emit code for C++, Python, and any future explicitly adopted language. It does not know algorithm categories.
 
 For example, the C++ backend knows how to emit:
 
@@ -190,8 +182,10 @@ internal/judge/harness/
                 list.go
                 tree.go
                 graph.go
-        java/                    # deferred until the C++ roadmap is complete
-        python/                  # deferred until the C++ roadmap is complete
+        python/
+            function.go
+            class.go
+            runtime.go
         # Additional language backends are added only when explicitly adopted.
 ```
 

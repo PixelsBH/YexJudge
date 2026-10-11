@@ -2,8 +2,12 @@ package judge
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"yexjudge/internal/judge/languages"
 )
 
 func validFunctionJob() Job {
@@ -19,6 +23,54 @@ func validFunctionJob() Job {
 			Expected: json.RawMessage(`42`),
 		}},
 		Limits: Limits{TimeLimitMs: 1000, MemoryLimitMb: 128},
+	}
+}
+
+func TestValidateJobRejectsUnsupportedLanguageBeforeQueueing(t *testing.T) {
+	job := validFunctionJob()
+	job.Language = "unsupported"
+	if err := ValidateJob(job); err == nil || !strings.Contains(err.Error(), "unsupported language") {
+		t.Fatalf("ValidateJob() error = %v, want unsupported-language validation", err)
+	}
+}
+
+func TestValidateJobAcceptsPythonFunctionMetadata(t *testing.T) {
+	job := validFunctionJob()
+	job.Language = "python"
+	job.SourceCode = "class Solution:\n    def value(self): return 42"
+	if err := ValidateJob(job); err != nil {
+		t.Fatalf("ValidateJob() error = %v", err)
+	}
+	program, err := generateModeProgram(job)
+	if err != nil {
+		t.Fatalf("generateModeProgram() error = %v", err)
+	}
+	if program.SourceFile != "main.py" || !strings.Contains(program.SourceCode, "__solution.value(*__args)") {
+		t.Fatalf("generated Python program = %+v, want a main.py Solution driver", program)
+	}
+	workspace, err := createWorkspace(job, languages.Python{})
+	if err != nil {
+		t.Fatalf("createWorkspace() error = %v", err)
+	}
+	defer os.RemoveAll(workspace)
+	if _, err := os.Stat(filepath.Join(workspace, "main.py")); err != nil {
+		t.Fatalf("createWorkspace() did not write generated Python source: %v", err)
+	}
+}
+
+func TestValidateJobAcceptsPythonClassMetadata(t *testing.T) {
+	job := Job{
+		Language: "python", Mode: "class",
+		SourceCode: "class Counter:\n    def get(self): return 1",
+		Class: &ClassSpec{
+			Name:       "Counter",
+			Operations: []ClassOperationSpec{{Name: "get", ReturnType: "int"}},
+		},
+		TestCases: []TestCase{{ID: 3, Operations: []OperationCall{{Name: "get"}}, Expected: json.RawMessage(`[1]`)}},
+		Limits:    Limits{TimeLimitMs: 1000, MemoryLimitMb: 128},
+	}
+	if err := ValidateJob(job); err != nil {
+		t.Fatalf("ValidateJob() error = %v", err)
 	}
 }
 

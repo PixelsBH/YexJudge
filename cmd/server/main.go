@@ -287,13 +287,7 @@ func main() {
 	runtimeWorkerCapacity = cfg.workerCount
 	runtimeCompileSlots = cfg.compileSlots
 	cmdRunner := &runner.DockerRunner{}
-	registry := languages.NewRegistry(
-		languages.Cpp{},
-		languages.C{},
-		languages.Python{},
-		languages.Go{},
-		languages.Java{},
-	)
+	registry := languages.DefaultRegistry()
 
 	executor := judge.NewDockerExecutor(cmdRunner)
 
