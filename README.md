@@ -14,14 +14,16 @@ docker build -t yexjudge-runtime:latest -f docker/runtime/Dockerfile .
 
 ### Run with Docker Compose
 
-Compose starts YexJudge and PostgreSQL:
+Compose starts YexJudge and PostgreSQL. Set a strong, URL-safe PostgreSQL password in the ignored `.env` file before starting the stack (see [Compose deployment](docs/operations.md#docker-compose-deployment)):
 
 ```bash
+printf 'POSTGRES_PASSWORD=%s\n' "$(openssl rand -hex 32)" >> .env
+chmod 600 .env
 mkdir -p .yexjudge-workspaces
 docker compose up --build
 ```
 
-The server is available at `http://localhost:8080`. Stop the stack with `docker compose down`; Compose gives the server time to remove its runtime sandbox containers during shutdown.
+The API is available to processes on the VPS at `http://127.0.0.1:8080`; it is not published on public interfaces. Stop the stack with `docker compose down`; Compose gives the server time to remove its runtime sandbox containers during shutdown.
 
 ### Run the Go server directly
 

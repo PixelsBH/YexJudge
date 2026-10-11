@@ -264,15 +264,9 @@ Explicit process environment variables override `.env`. The real `.env` file is 
 
 The server validates worker, sandbox, compile-worker, queue, timeout, and memory-budget configuration during startup.
 
-A local all-in-one deployment is available through Docker Compose:
+A single-host Compose deployment is available for local development or a personal/demo VPS. It requires `POSTGRES_PASSWORD` in the ignored `.env` file and publishes the YexJudge API only on `127.0.0.1:8080`; PostgreSQL is private to the Compose network. See [Operations](operations.md#docker-compose-deployment) for startup and deployment guidance.
 
-```bash
-docker build -t yexjudge-runtime:latest -f docker/runtime/Dockerfile .
-mkdir -p .yexjudge-workspaces
-docker compose up --build
-```
-
-The Compose application mounts the Docker socket because YexJudge launches sibling compile and runtime containers. This is suitable for trusted local development, not an untrusted multi-tenant deployment. The project directory is mounted at the same absolute path so host Docker can resolve workspace bind mounts. Compose publishes its PostgreSQL service on host port `5433` by default while the application connects internally to `postgres:5432`.
+The Compose application mounts the Docker socket because YexJudge launches sibling compile and runtime containers. Access to that socket gives the service powerful control over the host Docker daemon, so keep YexJudge private and do not mount the socket into YexCode or expose it to clients. Only the dedicated workspace directory is bind-mounted at an identical host/container path for Docker workspace staging. This single-host setup is not a multi-tenant isolation boundary.
 
 Readiness checks distinguish a live process from a service that can safely accept work:
 

@@ -134,15 +134,21 @@ The response includes queued/running/failed counts, worker and compile-worker ca
 
 ## Docker Compose deployment
 
-For a local all-in-one deployment, run from the project root:
+From the project root, create a strong hex password in the ignored `.env` file, build the runtime image, create the dedicated workspace directory, and start Compose:
 
 ```bash
+printf 'POSTGRES_PASSWORD=%s\n' "$(openssl rand -hex 32)" >> .env
+chmod 600 .env
 docker build -t yexjudge-runtime:latest -f docker/runtime/Dockerfile .
 mkdir -p .yexjudge-workspaces
 docker compose up --build
 ```
 
-Compose does not publish a PostgreSQL host port; the app connects privately over the Compose network at `postgres:5432`. The API is published only on `127.0.0.1:8080` (override the host port with `API_HOST_PORT`). Compose mounts the Docker socket because YexJudge launches sibling compile/runtime containers. This all-in-one setup is for local development only, not an untrusted multi-tenant deployment. The project directory is mounted at the same absolute path inside the app container so the host Docker daemon can resolve workspace bind mounts.
+Compose requires `POSTGRES_PASSWORD`; the hex value avoids URL-escaping problems in the PostgreSQL connection URL. Do not commit `.env`. For a PostgreSQL volume created by the previous Compose configuration, the initialized database still uses its original password (`postgres`): changing `POSTGRES_PASSWORD` does not rotate credentials in an existing volume. Keep `POSTGRES_PASSWORD=postgres` for that volume until you deliberately rotate the database role password; use the generated strong value for a fresh volume.
+
+PostgreSQL has no published host port and is reachable only over Compose's private network at `postgres:5432`. The API is published only on `127.0.0.1:8080` (override the host port with `API_HOST_PORT`), so a host process such as YexCode can call `http://127.0.0.1:8080`. Configure the public reverse proxy to route only to YexCode; do not add a public route to YexJudge. If YexCode is containerized, its own `127.0.0.1` is not the VPS host, so use a private container-network path for that connection instead.
+
+Compose mounts the Docker socket so YexJudge can launch sibling compile/runtime containers. Access to that socket gives YexJudge powerful control over the host Docker daemon; keep the service private and do not mount the socket into YexCode or expose it to clients. The workspace directory is mounted at the same absolute path in the server container so the host daemon can resolve workspace bind mounts. This setup is intended for a single-VPS personal/demo deployment, not as a multi-tenant isolation boundary.
 
 Stop the deployment with:
 
