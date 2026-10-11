@@ -33,6 +33,7 @@ const (
 
 type config struct {
 	port             string
+	pprofAddr        string
 	workerCount      int
 	sandboxPoolSize  int
 	compileSlots     int
@@ -60,6 +61,7 @@ func loadConfig() (config, error) {
 	}
 	cfg := config{
 		port:            getEnv("PORT", defaultPort),
+		pprofAddr:       getEnv("PPROF_ADDR", ""),
 		workerCount:     workerCount,
 		sandboxPoolSize: sandboxPoolSize,
 		compileSlots:    compileSlots,

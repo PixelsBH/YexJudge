@@ -10,6 +10,11 @@ if ! [[ "$REQUESTS" =~ ^[1-9][0-9]*$ && "$CONCURRENCY" =~ ^[1-9][0-9]*$ ]]; then
   exit 2
 fi
 
+if ! curl --fail --silent --show-error "$BASE_URL/ready" >/dev/null; then
+  printf 'YexJudge is not ready at %s; start the service and check its logs.\n' "$BASE_URL" >&2
+  exit 1
+fi
+
 payload='{"language":"cpp","sourceCode":"#include <iostream>\nint main(){std::cout << 42 << std::endl;}","testCases":[{"id":1,"input":"","expectedOutput":"42"}],"limits":{"timeLimitMs":1000,"memoryLimitMb":128}}'
 result_dir="$(mktemp -d)"
 trap 'rm -rf "$result_dir"' EXIT

@@ -11,11 +11,25 @@ func TestValidateConfigDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadConfig() error = %v", err)
 	}
+	if cfg.pprofAddr != "" {
+		t.Fatalf("PPROF_ADDR = %q, want disabled by default", cfg.pprofAddr)
+	}
 	if cfg.workerCount != defaultWorkerCount || cfg.sandboxPoolSize != defaultSandboxPoolSize || cfg.compileSlots != defaultCompileSlots {
 		t.Fatalf("capacity defaults = workers %d, sandboxes %d, compile slots %d", cfg.workerCount, cfg.sandboxPoolSize, cfg.compileSlots)
 	}
 	if cfg.maxQueued != defaultMaxQueued {
 		t.Fatalf("MAX_QUEUED = %d, want default %d", cfg.maxQueued, defaultMaxQueued)
+	}
+}
+
+func TestLoadConfigReadsPprofAddr(t *testing.T) {
+	t.Setenv("PPROF_ADDR", "127.0.0.1:6060")
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatalf("loadConfig() error = %v", err)
+	}
+	if cfg.pprofAddr != "127.0.0.1:6060" {
+		t.Fatalf("PPROF_ADDR = %q, want 127.0.0.1:6060", cfg.pprofAddr)
 	}
 }
 

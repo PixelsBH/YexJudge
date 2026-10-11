@@ -282,6 +282,10 @@ func main() {
 	if err != nil {
 		log.Fatal("invalid configuration:", err)
 	}
+	pprofServer, err := startPprofServer(cfg.pprofAddr)
+	if err != nil {
+		log.Fatal("failed to start pprof server:", err)
+	}
 	submitTimeout = cfg.submitTimeout
 	runtimeWorkerCapacity = cfg.workerCount
 	runtimeCompileSlots = cfg.compileSlots
@@ -354,6 +358,11 @@ func main() {
 
 		if err := server.Shutdown(shutdownCtx); err != nil {
 			log.Println("server shutdown error:", err)
+		}
+		if pprofServer != nil {
+			if err := pprofServer.Shutdown(shutdownCtx); err != nil {
+				log.Println("pprof server shutdown error:", err)
+			}
 		}
 
 		cancelWorkers()

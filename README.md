@@ -62,6 +62,6 @@ The server applies its schema and migrations during startup. For more configurat
 
 - [Submission API and examples](docs/usage.md)
 - [Configuration, deployment, and troubleshooting](docs/operations.md)
-- [Development checks and load testing](docs/development.md)
+- [Development checks, load testing, and profiling](docs/development.md)
 - [Architecture](docs/architecture.md)
 - [Future roadmap](docs/plan.md)
