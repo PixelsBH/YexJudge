@@ -37,9 +37,9 @@ services:
       DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in YexJudge/.env}@postgres:5432/yexjudge?sslmode=disable
       PORT: 8080
       TMPDIR: /home/pixels/.local/share/yexjudge/workspaces
-      WORKER_COUNT: 2
-      SANDBOX_POOL_SIZE: 2
-      COMPILE_SLOTS: 1
+      WORKER_COUNT: 4
+      SANDBOX_POOL_SIZE: 4
+      COMPILE_SLOTS: 2
       MAX_QUEUED: 50
     ports:
       - "127.0.0.1:${API_HOST_PORT:-8080}:8080"

@@ -16,11 +16,25 @@ docker build -t yexjudge-runtime:latest -f docker/runtime/Dockerfile .
 
 ### Run with Docker Compose
 
-Compose starts YexJudge and PostgreSQL. Set a strong, URL-safe PostgreSQL password in the ignored `.env` file before starting the stack (see [Compose deployment](docs/operations.md#docker-compose-deployment)):
+Compose starts YexJudge and PostgreSQL. Before the first startup, generate a strong URL-safe password:
 
 ```bash
-printf 'POSTGRES_PASSWORD=%s\n' "$(openssl rand -hex 32)" >> .env
-chmod 600 .env
+openssl rand -hex 32
+```
+
+Put the generated value in `.env` in the YexJudge project root as:
+
+```text
+POSTGRES_PASSWORD=<paste-the-generated-hex-password>
+```
+
+Keep `.env` private and set restrictive permissions with `chmod 600 .env`. Compose uses this setting both to initialize PostgreSQL and to build YexJudge's database connection URL. The password must match the password stored in the database; changing `.env` later does not rotate the password in an existing PostgreSQL volume. For an existing volume or a password-authentication error, follow the [PostgreSQL troubleshooting steps](docs/operations.md#troubleshooting).
+
+The Compose worker capacities are set in `docker-compose.yml`: `WORKER_COUNT=4`, `SANDBOX_POOL_SIZE=4`, and `COMPILE_SLOTS=2`. Do not put these in `.env` to configure the Compose stack; Compose does not pass arbitrary `.env` entries into the container. The application receives the values explicitly from the Compose service configuration.
+
+Then prepare the workspace and start the stack:
+
+```bash
 mkdir -p /home/pixels/.local/share/yexjudge/workspaces
 docker compose up --build
 ```

@@ -76,7 +76,7 @@ The real `.env` file is ignored by Git. Do not commit passwords or secrets. Expl
 DATABASE_URL='postgres://postgres:postgres@localhost:5432/yexjudge?sslmode=disable' go run ./cmd/server
 ```
 
-Available configuration variables include:
+For a server run directly with `go run ./cmd/server`, configuration variables include:
 
 ```text
 PORT=8080
@@ -91,6 +91,8 @@ QUEUE_MAX_ATTEMPTS=3
 MAX_QUEUED=100
 SUBMIT_TIMEOUT_MS=10000
 ```
+
+These variables can be set in `.env` for a direct server run. For Docker Compose, worker capacities are defined in `docker-compose.yml` and passed explicitly to the YexJudge container; values for these keys in the host `.env` file are not used by Compose.
 
 Capacity and lifecycle details:
 
@@ -136,16 +138,21 @@ The response includes queued/running/failed counts, worker and compile-worker ca
 
 ## Docker Compose deployment
 
-From the project root, create a strong hex password in the ignored `.env` file, create the dedicated workspace directory, and start Compose:
+From the project root, put a strong hex password in the ignored `.env` file, create the dedicated workspace directory, and start Compose:
 
 ```bash
-printf 'POSTGRES_PASSWORD=%s\n' "$(openssl rand -hex 32)" >> .env
+openssl rand -hex 32
+```
+
+Copy the generated value into `.env` as `POSTGRES_PASSWORD=<generated-hex-password>`, then run:
+
+```bash
 chmod 600 .env
 mkdir -p /home/pixels/.local/share/yexjudge/workspaces
 docker compose up --build
 ```
 
-Compose requires `POSTGRES_PASSWORD`; the hex value avoids URL-escaping problems in the PostgreSQL connection URL. Do not commit `.env`. For a PostgreSQL volume created by the previous Compose configuration, the initialized database still uses its original password (`postgres`): changing `POSTGRES_PASSWORD` does not rotate credentials in an existing volume. Keep `POSTGRES_PASSWORD=postgres` for that volume until you deliberately rotate the database role password; use the generated strong value for a fresh volume.
+Compose requires `POSTGRES_PASSWORD`; the hex value avoids URL-escaping problems in the PostgreSQL connection URL. Compose passes this setting to PostgreSQL for first-time initialization and uses it in YexJudge's `DATABASE_URL`. Do not commit `.env`. Changing `POSTGRES_PASSWORD` does not rotate credentials in an existing volume; preserve the existing password or deliberately rotate the database role password as described in [Troubleshooting](#troubleshooting). The Compose worker capacities are `WORKER_COUNT=4`, `SANDBOX_POOL_SIZE=4`, and `COMPILE_SLOTS=2`, configured in `docker-compose.yml` rather than `.env`.
 
 PostgreSQL has no published host port and is reachable only over Compose's private network at `postgres:5432`. The API is published only on `127.0.0.1:8080` (override the host port with `API_HOST_PORT`), so a host process such as YexCode can call `http://127.0.0.1:8080`. Configure the public reverse proxy to route only to YexCode; do not add a public route to YexJudge. If YexCode is containerized, its own `127.0.0.1` is not the VPS host, so use a private container-network path for that connection instead. The workspace bind mount defaults to `/home/pixels/.local/share/yexjudge/workspaces` on both host and server container; change both path values in `docker-compose.yml` if deploying under another user or host.
 
@@ -167,6 +174,20 @@ If the server fails during startup:
 - Confirm `yexjudge-runtime:latest` exists: `docker images | grep yexjudge-runtime`.
 - Check that `DATABASE_URL` in `.env` is correct, or provide it explicitly in the environment.
 - Check startup logs for migration errors; schema and numbered migrations are applied automatically.
+
+If the YexJudge logs report `password authentication failed for user "postgres"` (`SQLSTATE 28P01`), the password in Compose does not match the password stored in the existing PostgreSQL data volume. Changing `POSTGRES_PASSWORD` in `.env` does not update an initialized database. To preserve the data, connect to PostgreSQL locally inside its container and rotate the role password:
+
+```bash
+docker compose exec postgres psql -U postgres -d yexjudge
+```
+
+At the `psql` prompt, run `\password postgres` and enter a strong URL-safe (hex is recommended) password. Then set `POSTGRES_PASSWORD` in `.env` to that exact password and recreate YexJudge so its `DATABASE_URL` is refreshed:
+
+```bash
+docker compose up -d --force-recreate yexjudge
+```
+
+For an old local-development volume whose current password is still `postgres`, a temporary workaround is to set `POSTGRES_PASSWORD=postgres` in `.env` and recreate YexJudge; rotate it to a strong password before deployment. If the database data is disposable, `docker compose down -v` removes the volume and a subsequent `docker compose up --build` initializes a fresh database using the current `.env` password. **This permanently deletes all PostgreSQL data in the Compose volume.**
 
 If Docker Compose is not recognized or reports `unknown flag: --build`:
 
