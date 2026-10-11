@@ -6,7 +6,9 @@ YexJudge is a small online judge service written in Go. It accepts code submissi
 
 Requirements: Docker (with Compose v2 for the Compose setup), Go for running the server directly, and PostgreSQL for direct runs. Compose starts its own PostgreSQL service. Docker must be running and accessible to YexJudge.
 
-Build the runtime image from the project root (required for either setup):
+The Compose stack builds `yexjudge-runtime:latest` automatically from
+`docker/runtime/Dockerfile`. If you run the Go server directly instead of with
+Compose, build the runtime image manually:
 
 ```bash
 docker build -t yexjudge-runtime:latest -f docker/runtime/Dockerfile .
@@ -19,7 +21,7 @@ Compose starts YexJudge and PostgreSQL. Set a strong, URL-safe PostgreSQL passwo
 ```bash
 printf 'POSTGRES_PASSWORD=%s\n' "$(openssl rand -hex 32)" >> .env
 chmod 600 .env
-mkdir -p .yexjudge-workspaces
+mkdir -p /home/pixels/.local/share/yexjudge/workspaces
 docker compose up --build
 ```
 

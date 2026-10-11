@@ -13,6 +13,16 @@ services:
       interval: 2s
       timeout: 3s
       retries: 15
+    mem_limit: 512m
+    cpus: 0.5
+
+  runtime-image:
+    image: yexjudge-runtime:latest
+    build:
+      context: .
+      dockerfile: docker/runtime/Dockerfile
+    command: ["true"]
+    restart: "no"
 
   yexjudge:
     build:
@@ -21,19 +31,27 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      runtime-image:
+        condition: service_completed_successfully
     environment:
-      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD}@postgres:5432/yexjudge?sslmode=disable
+      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in YexJudge/.env}@postgres:5432/yexjudge?sslmode=disable
       PORT: 8080
-      TMPDIR: ${PWD}/.yexjudge-workspaces
+      TMPDIR: /home/pixels/.local/share/yexjudge/workspaces
+      WORKER_COUNT: 2
+      SANDBOX_POOL_SIZE: 2
+      COMPILE_SLOTS: 1
+      MAX_QUEUED: 50
     ports:
       - "127.0.0.1:${API_HOST_PORT:-8080}:8080"
+    mem_limit: 1g
+    cpus: 1.0
     restart: unless-stopped
     stop_grace_period: 20s
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      # Keep this path identical on the host and in the server container because
-      # the host Docker daemon bind-mounts compile workspaces from this path.
-      - ${PWD}/.yexjudge-workspaces:${PWD}/.yexjudge-workspaces
+      # The host and server container paths must match because the host Docker daemon
+      # bind-mounts workspaces at this absolute path for compile/runtime containers.
+      - /home/pixels/.local/share/yexjudge/workspaces:/home/pixels/.local/share/yexjudge/workspaces
     working_dir: /app
 
 volumes:
