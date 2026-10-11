@@ -25,6 +25,7 @@ const (
 	compileArtifactArchiveBytes = 80 << 20
 	transferCleanupTimeout      = 5 * time.Second
 	caseCleanupTimeout          = 30 * time.Second
+	sandboxStagingTimeout       = 15 * time.Second
 	sandboxReadyTimeout         = 2 * time.Second
 	sandboxReadyPoll            = 50 * time.Millisecond
 )
@@ -409,12 +410,14 @@ func transferWorkspaceArchive(ctx context.Context, producer, extractor *exec.Cmd
 }
 
 func (e *DockerExecutor) PrepareSandbox(ctx context.Context, sandbox *Sandbox, workspace string) error {
-	if err := validateWorkspaceForTransfer(workspace); err != nil {
+	stagingCtx, cancel := context.WithTimeout(ctx, sandboxStagingTimeout)
+	defer cancel()
+	if err := validateWorkspaceForTransfer(stagingCtx, workspace); err != nil {
 		return err
 	}
 
 	result, err := e.runner.Run(
-		ctx,
+		stagingCtx,
 		"",
 		"docker",
 		"exec",
@@ -430,9 +433,9 @@ func (e *DockerExecutor) PrepareSandbox(ctx context.Context, sandbox *Sandbox, w
 		return err
 	}
 
-	producer := exec.CommandContext(ctx, "tar", "-C", workspace, "-cf", "-", ".")
+	producer := exec.CommandContext(stagingCtx, "tar", "-C", workspace, "-cf", "-", ".")
 	extractor := exec.CommandContext(
-		ctx,
+		stagingCtx,
 		"docker",
 		"exec",
 		"-i",
@@ -449,12 +452,12 @@ func (e *DockerExecutor) PrepareSandbox(ctx context.Context, sandbox *Sandbox, w
 	extractorStderr.limit = runner.DefaultOutputLimitBytes
 	producer.Stderr = &producerStderr
 	extractor.Stderr = &extractorStderr
-	if err := transferWorkspaceArchive(ctx, producer, extractor); err != nil {
+	if err := transferWorkspaceArchive(stagingCtx, producer, extractor); err != nil {
 		return fmt.Errorf("transfer workspace archive: %w; tar: %s; docker: %s", err, producerStderr.String(), extractorStderr.String())
 	}
 
 	result, err = e.runner.Run(
-		ctx,
+		stagingCtx,
 		"",
 		"docker",
 		"exec",

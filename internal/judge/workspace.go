@@ -2,6 +2,7 @@ package judge
 
 import (
 	"archive/tar"
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -206,11 +207,17 @@ func safeArchivePath(name string) (string, error) {
 	return clean, nil
 }
 
-func validateWorkspaceForTransfer(workspace string) error {
+func validateWorkspaceForTransfer(ctx context.Context, workspace string) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("validate workspace before transfer: %w", err)
+	}
 	entries := 0
 	files := 0
 	var totalBytes int64
 	err := filepath.WalkDir(workspace, func(name string, entry os.DirEntry, walkErr error) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if walkErr != nil {
 			return walkErr
 		}

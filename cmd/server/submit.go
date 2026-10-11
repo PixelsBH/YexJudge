@@ -20,13 +20,8 @@ func submitHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer r.Body.Close()
 
-	job, ok := decodeJudgeJob(w, r)
+	job, ok := decodeAndValidateJudgeJob(w, r)
 	if !ok {
-		return
-	}
-
-	if err := judge.ValidateJob(job); err != nil {
-		writeAPIError(w, http.StatusBadRequest, "validation_error", err.Error())
 		return
 	}
 

@@ -34,6 +34,43 @@ func TestNewHTTPServerWriteTimeoutScalesWithSubmitBudget(t *testing.T) {
 	}
 }
 
+func TestSubmissionHandlersRejectWhenValidationCapacityIsFull(t *testing.T) {
+	handlers := []struct {
+		name    string
+		handler http.HandlerFunc
+		path    string
+	}{
+		{name: "async", handler: createSubmissionHandler, path: "/submissions"},
+		{name: "synchronous", handler: submitHandler, path: "/submit"},
+	}
+
+	for _, test := range handlers {
+		t.Run(test.name, func(t *testing.T) {
+			if got := len(validationSlots); got != 0 {
+				t.Fatalf("validation slots not empty before test: %d", got)
+			}
+			for i := 0; i < maxConcurrentValidations; i++ {
+				validationSlots <- struct{}{}
+			}
+			defer func() {
+				for i := 0; i < maxConcurrentValidations; i++ {
+					<-validationSlots
+				}
+			}()
+
+			recorder := httptest.NewRecorder()
+			request := httptest.NewRequest(http.MethodPost, test.path, nil)
+			test.handler(recorder, request)
+			if recorder.Code != http.StatusServiceUnavailable {
+				t.Fatalf("status = %d, want %d", recorder.Code, http.StatusServiceUnavailable)
+			}
+			if recorder.Header().Get("Retry-After") != "1" {
+				t.Fatalf("Retry-After = %q, want 1", recorder.Header().Get("Retry-After"))
+			}
+		})
+	}
+}
+
 func TestWriteSubmissionAdmissionError(t *testing.T) {
 	t.Run("queue full is retryable service unavailable", func(t *testing.T) {
 		recorder := httptest.NewRecorder()

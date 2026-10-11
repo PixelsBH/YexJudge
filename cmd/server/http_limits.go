@@ -9,12 +9,15 @@ import (
 )
 
 const (
-	serverReadHeaderTimeout = 5 * time.Second
-	serverReadTimeout       = 10 * time.Second
-	serverIdleTimeout       = 60 * time.Second
-	serverMaxHeaderBytes    = 16 << 10
-	submitResponseOverhead  = 15 * time.Second
+	serverReadHeaderTimeout  = 5 * time.Second
+	serverReadTimeout        = 10 * time.Second
+	serverIdleTimeout        = 60 * time.Second
+	serverMaxHeaderBytes     = 16 << 10
+	maxConcurrentValidations = 16
+	submitResponseOverhead   = 15 * time.Second
 )
+
+var validationSlots = make(chan struct{}, maxConcurrentValidations)
 
 func newHTTPServer(address string, handler http.Handler, submitTimeout time.Duration) *http.Server {
 	writeTimeout := submitTimeout + submitResponseOverhead
@@ -30,6 +33,38 @@ func newHTTPServer(address string, handler http.Handler, submitTimeout time.Dura
 		IdleTimeout:       serverIdleTimeout,
 		MaxHeaderBytes:    serverMaxHeaderBytes,
 	}
+}
+
+func acquireValidationSlot(w http.ResponseWriter) bool {
+	select {
+	case validationSlots <- struct{}{}:
+		return true
+	default:
+		w.Header().Set("Retry-After", "1")
+		writeAPIError(w, http.StatusServiceUnavailable, "validation_busy", "submission validation is busy; retry later")
+		return false
+	}
+}
+
+func releaseValidationSlot() {
+	<-validationSlots
+}
+
+func decodeAndValidateJudgeJob(w http.ResponseWriter, r *http.Request) (judge.Job, bool) {
+	if !acquireValidationSlot(w) {
+		return judge.Job{}, false
+	}
+	defer releaseValidationSlot()
+
+	job, ok := decodeJudgeJob(w, r)
+	if !ok {
+		return judge.Job{}, false
+	}
+	if err := judge.ValidateJob(job); err != nil {
+		writeAPIError(w, http.StatusBadRequest, "validation_error", err.Error())
+		return judge.Job{}, false
+	}
+	return job, true
 }
 
 func writeSubmissionAdmissionError(w http.ResponseWriter, err error) {

@@ -108,11 +108,11 @@ Capacity and lifecycle details:
 
 Execution and API safeguards:
 
-- JSON bodies are limited to 1 MiB; unknown fields and trailing JSON values are rejected with `400`. The HTTP server bounds headers to 16 KiB, header reads to 5 seconds, complete request reads to 10 seconds, keep-alive idle time to 60 seconds, and response writes to the synchronous submit budget plus response overhead.
+- JSON bodies are limited to 1 MiB; unknown fields and trailing JSON values are rejected with `400`. At most 16 submission bodies are decoded and validated concurrently; excess requests receive `503` with `Retry-After`. The HTTP server bounds headers to 16 KiB, header reads to 5 seconds, complete request reads to 10 seconds, keep-alive idle time to 60 seconds, and response writes to the synchronous submit budget plus response overhead.
 - Every response includes an `X-Request-ID`; valid client-supplied IDs are preserved. API errors use `{ "error": { "code", "message", "requestId" } }`.
 - Compiler and runtime stdout/stderr are each capped at 64 KiB. Exceeding the cap cancels execution and returns `output_limit_exceeded`.
 - Compile containers run without network access and with bounded CPU, memory, PIDs, file sizes, compiler output/artifact size, and an unprivileged user. Runtime sandboxes use the shared image with similar restrictions. Testcases restart and restore the sandbox between cases so one case cannot reuse mutable filesystem or process state from another.
-- Reusable sandboxes are checked after startup and restart. Failed reset or readiness checks cause replacement.
+- Reusable sandboxes are checked after startup and restart. Failed reset or readiness checks cause replacement. Workspace staging has a 15-second deadline and rejects workspace snapshots exceeding its file, entry, or byte limits.
 - Authentication and per-user rate limiting are deferred because the service does not yet have a user/account model.
 
 ## Health and diagnostics

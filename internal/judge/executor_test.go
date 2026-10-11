@@ -26,6 +26,16 @@ type recordingRunner struct {
 	resultFor func(executorCall) *runner.RunResult
 }
 
+type deadlineRecordingRunner struct {
+	deadline    time.Time
+	hasDeadline bool
+}
+
+func (r *deadlineRecordingRunner) Run(ctx context.Context, _ string, _ string, _ ...string) (*runner.RunResult, error) {
+	r.deadline, r.hasDeadline = ctx.Deadline()
+	return &runner.RunResult{ExitCode: 1}, nil
+}
+
 func (r *recordingRunner) Run(_ context.Context, _ string, command string, args ...string) (*runner.RunResult, error) {
 	call := executorCall{command: command, args: append([]string(nil), args...)}
 	r.calls = append(r.calls, call)
@@ -141,6 +151,21 @@ func TestDockerExecutorCompileUsesBoundedIsolatedOutput(t *testing.T) {
 	}
 	if recorder.calls[1].args[0] != "rm" {
 		t.Fatalf("second docker call = %v, want container cleanup", recorder.calls[1].args)
+	}
+}
+
+func TestPrepareSandboxAppliesStagingDeadline(t *testing.T) {
+	recorder := &deadlineRecordingRunner{}
+	executor := NewDockerExecutor(recorder)
+	err := executor.PrepareSandbox(context.Background(), &Sandbox{ContainerName: "sandbox"}, t.TempDir())
+	if err == nil {
+		t.Fatal("PrepareSandbox() unexpectedly succeeded")
+	}
+	if !recorder.hasDeadline {
+		t.Fatal("sandbox staging command had no deadline")
+	}
+	if remaining := time.Until(recorder.deadline); remaining <= 0 || remaining > sandboxStagingTimeout {
+		t.Fatalf("staging deadline has %s remaining, want at most %s", remaining, sandboxStagingTimeout)
 	}
 }
 

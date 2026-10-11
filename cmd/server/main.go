@@ -37,14 +37,8 @@ func createSubmissionHandler(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
-
-	job, ok := decodeJudgeJob(w, r)
+	job, ok := decodeAndValidateJudgeJob(w, r)
 	if !ok {
-		return
-	}
-
-	if err := judge.ValidateJob(job); err != nil {
-		writeAPIError(w, http.StatusBadRequest, "validation_error", err.Error())
 		return
 	}
 

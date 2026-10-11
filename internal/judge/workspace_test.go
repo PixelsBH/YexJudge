@@ -2,6 +2,8 @@ package judge
 
 import (
 	"archive/tar"
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -104,6 +106,14 @@ func TestAddCompilerArtifactSizeEnforcesFileAndAggregateLimits(t *testing.T) {
 	}
 }
 
+func TestValidateWorkspaceForTransferRejectsCanceledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := validateWorkspaceForTransfer(ctx, t.TempDir()); !errors.Is(err, context.Canceled) {
+		t.Fatalf("validateWorkspaceForTransfer() error = %v, want context cancellation", err)
+	}
+}
+
 func TestValidateWorkspaceForTransferRejectsSymlinks(t *testing.T) {
 	workspace := t.TempDir()
 	if err := os.WriteFile(filepath.Join(workspace, "main.py"), []byte("print('ok')"), 0600); err != nil {
@@ -112,7 +122,7 @@ func TestValidateWorkspaceForTransferRejectsSymlinks(t *testing.T) {
 	if err := os.Symlink("main.py", filepath.Join(workspace, "alias")); err != nil {
 		t.Skipf("symlinks are unavailable: %v", err)
 	}
-	if err := validateWorkspaceForTransfer(workspace); err == nil || !strings.Contains(err.Error(), "not a regular file") {
+	if err := validateWorkspaceForTransfer(context.Background(), workspace); err == nil || !strings.Contains(err.Error(), "not a regular file") {
 		t.Fatalf("validateWorkspaceForTransfer() error = %v, want symlink rejection", err)
 	}
 }
