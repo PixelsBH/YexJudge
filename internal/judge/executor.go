@@ -225,10 +225,7 @@ func (e *DockerExecutor) StartSandbox(ctx context.Context) (*Sandbox, error) {
 	ctxContainer, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	result, err := e.runner.Run(
-		ctxContainer,
-		"",
-		"docker",
+	runArgs := []string{
 		"run",
 		"-d",
 		"--name", containerName,
@@ -238,16 +235,24 @@ func (e *DockerExecutor) StartSandbox(ctx context.Context) (*Sandbox, error) {
 		"--network", "none",
 		"--pids-limit", "64",
 		"--ulimit", "nofile=1024:1024",
+	}
+	runArgs = append(runArgs,
+		"--init",
+		"--shm-size", "16m",
 		"--cap-drop", "ALL",
-		"--user", "10001:10001",
+		"--cap-add", "SETUID",
+		"--cap-add", "SETGID",
+		"--cap-add", "KILL",
+		"--cap-add", "DAC_OVERRIDE",
+		"--cap-add", "FOWNER",
+		"--user", "0:0",
 		"--security-opt", "no-new-privileges",
 		"--read-only",
-		"--tmpfs", "/workspace:rw,exec,size=64m,mode=700,uid=10001,gid=10001",
-		"--tmpfs", "/tmp:rw,noexec,nosuid,size=16m,mode=700,uid=10001,gid=10001",
-		"--workdir", "/workspace",
-		RuntimeSandboxImage,
-		"sleep", "infinity",
+		"--tmpfs", "/workspace:rw,exec,size=64m,mode=1777,uid=0,gid=0",
+		"--tmpfs", "/tmp:rw,noexec,nosuid,size=16m,mode=1777,uid=0,gid=0",
 	)
+	runArgs = append(runArgs, "--workdir", "/workspace", RuntimeSandboxImage, "sleep", "infinity")
+	result, err := e.runner.Run(ctxContainer, "", "docker", runArgs...)
 	if err != nil {
 		return nil, err
 	}
@@ -280,7 +285,10 @@ func (e *DockerExecutor) ConfigureSandbox(ctx context.Context, sandbox *Sandbox,
 	if err != nil {
 		return err
 	}
-	return dockerCommandError("configure sandbox", result)
+	if err := dockerCommandError("configure sandbox", result); err != nil {
+		return err
+	}
+	return nil
 }
 
 type boundedArchiveWriter struct {
@@ -416,16 +424,15 @@ func (e *DockerExecutor) PrepareSandbox(ctx context.Context, sandbox *Sandbox, w
 		return err
 	}
 
-	result, err := e.runner.Run(
-		stagingCtx,
-		"",
-		"docker",
-		"exec",
+	clearArgs := []string{"exec"}
+	clearArgs = append(clearArgs, "--user", "0:0")
+	clearArgs = append(clearArgs,
 		sandbox.ContainerName,
 		"sh",
 		"-c",
 		"rm -rf /workspace/* /workspace/.[!.]* /workspace/..?*",
 	)
+	result, err := e.runner.Run(stagingCtx, "", "docker", clearArgs...)
 	if err != nil {
 		return err
 	}
@@ -434,18 +441,12 @@ func (e *DockerExecutor) PrepareSandbox(ctx context.Context, sandbox *Sandbox, w
 	}
 
 	producer := exec.CommandContext(stagingCtx, "tar", "-C", workspace, "-cf", "-", ".")
-	extractor := exec.CommandContext(
-		stagingCtx,
-		"docker",
-		"exec",
-		"-i",
-		sandbox.ContainerName,
-		"tar",
-		"-xf",
-		"-",
-		"-C",
-		"/workspace",
-	)
+	extractorArgs := []string{"exec"}
+	extractorArgs = append(extractorArgs, "--user", "0:0")
+	extractorArgs = append(extractorArgs, "-i", sandbox.ContainerName, "tar")
+	extractorArgs = append(extractorArgs, "--no-same-owner")
+	extractorArgs = append(extractorArgs, "-xf", "-", "-C", "/workspace")
+	extractor := exec.CommandContext(stagingCtx, "docker", extractorArgs...)
 	var producerStderr diagnosticBuffer
 	var extractorStderr diagnosticBuffer
 	producerStderr.limit = runner.DefaultOutputLimitBytes
@@ -456,16 +457,17 @@ func (e *DockerExecutor) PrepareSandbox(ctx context.Context, sandbox *Sandbox, w
 		return fmt.Errorf("transfer workspace archive: %w; tar: %s; docker: %s", err, producerStderr.String(), extractorStderr.String())
 	}
 
-	result, err = e.runner.Run(
-		stagingCtx,
-		"",
-		"docker",
-		"exec",
+	mainMode := "755"
+	permissionScript := "find /workspace -type d -exec chmod 755 {} + && find /workspace -type f -exec chmod go-w {} + && chmod 1777 /workspace && if [ -f /workspace/main ]; then chmod "
+	chmodArgs := []string{"exec"}
+	chmodArgs = append(chmodArgs, "--user", "0:0")
+	chmodArgs = append(chmodArgs,
 		sandbox.ContainerName,
 		"sh",
 		"-c",
-		"if [ -f /workspace/main ]; then chmod 700 /workspace/main; fi",
+		permissionScript+mainMode+" /workspace/main; fi",
 	)
+	result, err = e.runner.Run(stagingCtx, "", "docker", chmodArgs...)
 	if err != nil {
 		return err
 	}
@@ -508,15 +510,16 @@ func (e *DockerExecutor) RunTestCase(
 	spec languages.Spec,
 ) (*runner.RunResult, error) {
 	memoryMarker := fmt.Sprintf("__YEXJUDGE_MAX_RSS_KB_%d:", time.Now().UnixNano())
-	execArgs := []string{
-		"exec",
+	execArgs := []string{"exec"}
+	execArgs = append(execArgs, "--user", "10001:10001")
+	execArgs = append(execArgs,
 		"-i",
 		sandbox.ContainerName,
 		"/usr/bin/time",
 		"-f",
-		memoryMarker + "%M\\n",
+		memoryMarker+"%M\\n",
 		"--",
-	}
+	)
 	execArgs = append(execArgs, spec.RunCommand()...)
 
 	result, err := e.runner.Run(

@@ -1,5 +1,15 @@
 package languages
 
+import (
+	_ "embed"
+	"strings"
+)
+
+//go:embed cpp_compile_flags.txt
+var cppCompileFlags string
+
+const CppCompileImage = "yexjudge-cpp-compile:latest"
+
 type Cpp struct{}
 
 func (Cpp) Name() string {
@@ -15,20 +25,13 @@ func (Cpp) NeedsCompile() bool {
 }
 
 func (Cpp) CompileImage() string {
-	return "gcc:13"
+	return CppCompileImage
 }
 
 func (Cpp) CompileCommand() []string {
-	return []string{
-		"g++",
-		"-O2",
-		"-pipe",
-		"-static",
-		"-s",
-		"/workspace/main.cpp",
-		"-o",
-		"/workspace/main",
-	}
+	command := []string{"g++"}
+	command = append(command, strings.Fields(cppCompileFlags)...)
+	return append(command, "/workspace/main.cpp", "-o", "/workspace/main")
 }
 
 func (Cpp) RunCommand() []string {

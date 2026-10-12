@@ -247,6 +247,8 @@ func validateObservations(function harness.FunctionSpec, returnAdapter types.Ada
 func generateMain(request harness.Request, registry *types.Registry) (string, error) {
 	var source strings.Builder
 	source.WriteString("int main() {\n")
+	source.WriteString("    ios::sync_with_stdio(false);\n")
+	source.WriteString("    cin.tie(nullptr);\n")
 	source.WriteString("    int __case_id;\n")
 	source.WriteString("    if (!(cin >> __case_id)) return 1;\n")
 	source.WriteString("    Solution __solution;\n")

@@ -9,39 +9,78 @@ import (
 	"time"
 	functiontypes "yexjudge/internal/judge/harness/cpp/types"
 	"yexjudge/internal/judge/languages"
+	"yexjudge/internal/runner"
 )
 
 func runTestCases(
 	ctx context.Context, executor Executor,
 	sandbox *Sandbox, workspace string, job Job, spec languages.Spec) (Result, error) {
+	if _, ok := executor.(testcaseSupervisorExecutor); ok {
+		return runTestCasesWithSandboxReset(ctx, executor, sandbox, workspace, job, spec, false)
+	}
+	return runTestCasesWithSandboxReset(ctx, executor, sandbox, workspace, job, spec, true)
+}
+
+func runTestCasesWithSandboxReset(
+	ctx context.Context, executor Executor,
+	sandbox *Sandbox, workspace string, job Job, spec languages.Spec,
+	resetSandboxBetweenTestCases bool,
+) (Result, error) {
 	maxRuntimeMs := 0
 	var maxMemoryBytes int64
 	total := len(job.TestCases)
 	passed := 0
-
-	for _, tc := range job.TestCases {
-		ctxRun, cancelRun := context.WithTimeout(
-			ctx,
-			time.Duration(job.Limits.TimeLimitMs)*time.Millisecond,
-		)
-
-		runRes, err := executor.RunTestCase(
-			ctxRun,
-			sandbox,
-			testCaseInput(job, tc),
-			spec,
-		)
-
-		cancelRun()
-
-		if cleanupErr := resetAndRestageSandbox(executor, sandbox, workspace); cleanupErr != nil {
-			sandbox.needsReplace = true
-			if err != nil {
-				return Result{}, fmt.Errorf("test case %d failed: %v; sandbox cleanup failed: %w", tc.ID, err, cleanupErr)
+	var supervisorResults []*runner.RunResult
+	if !resetSandboxBetweenTestCases {
+		if supervisorExecutor, ok := executor.(testcaseSupervisorExecutor); ok {
+			inputs := make([]string, len(job.TestCases))
+			for i, tc := range job.TestCases {
+				inputs[i] = testCaseInput(job, tc)
 			}
-			return Result{}, fmt.Errorf("cleanup after test case %d: %w", tc.ID, cleanupErr)
+			perCaseLimit := time.Duration(job.Limits.TimeLimitMs) * time.Millisecond
+			supervisorTimeout := time.Duration(total)*(perCaseLimit+25*time.Millisecond) + 5*time.Second
+			supervisorCtx, cancelSupervisor := context.WithTimeout(ctx, supervisorTimeout)
+			var err error
+			supervisorResults, err = supervisorExecutor.RunTestCases(supervisorCtx, sandbox, inputs, spec, perCaseLimit)
+			cancelSupervisor()
+			if err != nil {
+				return Result{}, err
+			}
 		}
-		sandbox.restarted = true
+	}
+
+	for i, tc := range job.TestCases {
+		var runRes *runner.RunResult
+		var err error
+		if supervisorResults != nil {
+			if i >= len(supervisorResults) {
+				return Result{}, fmt.Errorf("supervisor returned no result for test case %d", tc.ID)
+			}
+			runRes = supervisorResults[i]
+		} else {
+			ctxRun, cancelRun := context.WithTimeout(
+				ctx,
+				time.Duration(job.Limits.TimeLimitMs)*time.Millisecond,
+			)
+			runRes, err = executor.RunTestCase(
+				ctxRun,
+				sandbox,
+				testCaseInput(job, tc),
+				spec,
+			)
+			cancelRun()
+		}
+
+		if resetSandboxBetweenTestCases {
+			if cleanupErr := resetAndRestageSandbox(executor, sandbox, workspace); cleanupErr != nil {
+				sandbox.needsReplace = true
+				if err != nil {
+					return Result{}, fmt.Errorf("test case %d failed: %v; sandbox cleanup failed: %w", tc.ID, err, cleanupErr)
+				}
+				return Result{}, fmt.Errorf("cleanup after test case %d: %w", tc.ID, cleanupErr)
+			}
+			sandbox.restarted = true
+		}
 
 		if err != nil {
 			return Result{}, err
@@ -81,6 +120,17 @@ func runTestCases(
 		if runRes.TimedOut {
 			return Result{
 				Status:          TimeLimitExceeded,
+				PassedTestCases: passed,
+				TotalTestCases:  total,
+				RuntimeMs:       runtimeMs,
+				MemoryMb:        memoryMb,
+				FailedTestCase:  failedTestCase(tc, runRes.Stdout),
+			}, nil
+		}
+
+		if runRes.ExitCode == -1 && job.Limits.MemoryLimitMb > 0 && runRes.MemoryUsed >= int64(job.Limits.MemoryLimitMb)*1024*1024*9/10 {
+			return Result{
+				Status:          MemoryLimitExceeded,
 				PassedTestCases: passed,
 				TotalTestCases:  total,
 				RuntimeMs:       runtimeMs,

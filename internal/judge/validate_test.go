@@ -285,6 +285,17 @@ func TestValidateJobRejectsUnsupportedCustomPostcondition(t *testing.T) {
 	}
 }
 
+func TestValidateJobAcceptsFiveHundredTestCases(t *testing.T) {
+	job := validFunctionJob()
+	job.TestCases = make([]TestCase, MaxTestCases)
+	for i := range job.TestCases {
+		job.TestCases[i] = TestCase{ID: i + 1, Expected: json.RawMessage(`42`)}
+	}
+	if err := ValidateJob(job); err != nil {
+		t.Fatalf("ValidateJob() rejected %d test cases: %v", MaxTestCases, err)
+	}
+}
+
 func TestValidateJobRejectsLimitsAndOversizedPayloads(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -297,7 +308,7 @@ func TestValidateJobRejectsLimitsAndOversizedPayloads(t *testing.T) {
 		{name: "memory limit too high", mutate: func(job *Job) { job.Limits.MemoryLimitMb = MaxMemoryLimitMb + 1 }, want: "memoryLimitMb"},
 		{name: "source too large", mutate: func(job *Job) { job.SourceCode = strings.Repeat("x", 100_001) }, want: "sourceCode is too large"},
 		{name: "too many test cases", mutate: func(job *Job) {
-			job.TestCases = make([]TestCase, 101)
+			job.TestCases = make([]TestCase, MaxTestCases+1)
 			for i := range job.TestCases {
 				job.TestCases[i] = TestCase{ID: i + 1, ExpectedOutput: ""}
 			}

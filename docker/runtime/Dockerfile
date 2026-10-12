@@ -1,4 +1,12 @@
+FROM golang:1.26-bookworm AS runner-build
+
+WORKDIR /src
+COPY cmd/yexsupervisor/main.go ./main.go
+RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/yexsupervisor ./main.go
+
 FROM debian:bookworm-slim
+
+COPY --from=runner-build /out/yexsupervisor /usr/local/bin/yexsupervisor
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \

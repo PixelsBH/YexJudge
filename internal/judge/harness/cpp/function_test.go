@@ -41,6 +41,8 @@ public:
 
 	for _, expected := range []string{
 		"#include <bits/stdc++.h>",
+		"ios::sync_with_stdio(false);",
+		"cin.tie(nullptr);",
 		"class Solution",
 		"vector<int> values = vector<int>{1, 2, 3};",
 		"bool enabled = true;",

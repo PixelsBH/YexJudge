@@ -14,6 +14,7 @@ import (
 const (
 	MaxTimeLimitMs   = 10_000
 	MaxMemoryLimitMb = 512
+	MaxTestCases     = 500
 )
 
 var supportedLanguages = languages.DefaultRegistry()
@@ -72,7 +73,7 @@ func ValidateJob(job Job) error {
 		return fmt.Errorf("sourceCode is too large")
 	}
 
-	if len(job.TestCases) > 100 {
+	if len(job.TestCases) > MaxTestCases {
 		return fmt.Errorf("too many test cases")
 	}
 

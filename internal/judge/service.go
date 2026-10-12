@@ -203,7 +203,14 @@ func (s *Service) ProcessSubmission(ctx context.Context, submission Submission) 
 	if err != nil {
 		return infrastructureFailure("acquire sandbox: " + err.Error())
 	}
-	defer s.pool.Release(sandbox)
+	_, supervisorSupported := s.executor.(testcaseSupervisorExecutor)
+	defer func() {
+		if supervisorSupported {
+			go s.pool.Release(sandbox)
+			return
+		}
+		s.pool.Release(sandbox)
+	}()
 
 	stagingStarted := time.Now()
 	if err := s.executor.PrepareSandbox(ctx, sandbox, workspace); err != nil {

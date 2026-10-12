@@ -247,7 +247,7 @@ func TestDockerExecutorMeasuresPeakResidentMemory(t *testing.T) {
 	if result.Stderr != "program warning" {
 		t.Fatalf("Stderr = %q, want program stderr without the time marker", result.Stderr)
 	}
-	if len(recorder.calls) != 1 || !hasExecutorArg(recorder.calls[0].args, "exec", "-i", "sandbox", "/usr/bin/time", "-f") {
+	if len(recorder.calls) != 1 || !hasExecutorArg(recorder.calls[0].args, "exec", "--user", "10001:10001", "-i", "sandbox", "/usr/bin/time", "-f") {
 		t.Fatalf("docker calls = %+v, want execution wrapped by GNU time", recorder.calls)
 	}
 }

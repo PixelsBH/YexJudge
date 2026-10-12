@@ -24,6 +24,16 @@ services:
     command: ["true"]
     restart: "no"
 
+  cpp-compile-image:
+    image: yexjudge-cpp-compile:latest
+    build:
+      context: .
+      dockerfile: docker/compile/Dockerfile
+      args:
+        YEXJUDGE_CPP_FLAGS: ${YEXJUDGE_CPP_FLAGS:-}
+    command: ["true"]
+    restart: "no"
+
   yexjudge:
     build:
       context: .
@@ -32,6 +42,8 @@ services:
       postgres:
         condition: service_healthy
       runtime-image:
+        condition: service_completed_successfully
+      cpp-compile-image:
         condition: service_completed_successfully
     environment:
       DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in YexJudge/.env}@postgres:5432/yexjudge?sslmode=disable

@@ -107,6 +107,23 @@ func testCaseJob(expected string) Job {
 	}
 }
 
+func TestRunTestCasesCanSkipSandboxResetForTrustedBenchmark(t *testing.T) {
+	job := testCaseJob("expected")
+	executor := &testcaseExecutor{runs: []*runner.RunResult{{Stdout: "expected", ExitCode: 0}}}
+	sandbox := &Sandbox{ContainerName: "test"}
+
+	result, err := runTestCasesWithSandboxReset(context.Background(), executor, sandbox, "", job, languages.Python{}, false)
+	if err != nil {
+		t.Fatalf("runTestCasesWithSandboxReset() error = %v", err)
+	}
+	if result.Status != Accepted {
+		t.Fatalf("status = %q, want accepted", result.Status)
+	}
+	if executor.resetCalls != 0 || executor.prepareCalls != 0 || sandbox.restarted {
+		t.Fatalf("cleanup calls = reset:%d prepare:%d restarted:%t, want no per-case cleanup", executor.resetCalls, executor.prepareCalls, sandbox.restarted)
+	}
+}
+
 func TestRunTestCasesMapsVerdicts(t *testing.T) {
 	tests := []struct {
 		name          string
