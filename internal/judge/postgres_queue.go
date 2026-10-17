@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -163,10 +164,17 @@ func (q *PostgresSubmissionQueue) RecoverExpired(ctx context.Context) (int, erro
 				ID:             item.ID,
 			})
 		} else {
-			message = fmt.Sprintf("%s; retry limit %d reached", message, q.maxAttempts)
+			// Operators get the detail in the log; the submission row keeps a
+			// generic message so internal queue state is not exposed to users.
+			slog.Error("submission lease expired without completion",
+				"submission_id", item.ID,
+				"attempt", attempt,
+				"max_attempts", q.maxAttempts,
+			)
+			userMessage := "The judge timed out while processing this submission. Please retry."
 			resultJSON, marshalErr := json.Marshal(Result{
 				Status:       InfrastructureError,
-				ErrorMessage: message,
+				ErrorMessage: userMessage,
 			})
 			if marshalErr != nil {
 				return 0, marshalErr
@@ -174,7 +182,7 @@ func (q *PostgresSubmissionQueue) RecoverExpired(ctx context.Context) (int, erro
 			rows, err = queries.FailExpiredSubmission(opCtx, dbquery.FailExpiredSubmissionParams{
 				Status:         string(SubmissionFailed),
 				Result:         resultJSON,
-				FailureMessage: nullableText(message),
+				FailureMessage: nullableText(userMessage),
 				ID:             item.ID,
 			})
 		}

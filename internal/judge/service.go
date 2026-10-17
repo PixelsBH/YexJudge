@@ -101,21 +101,26 @@ func (s *Service) ProcessSubmission(ctx context.Context, submission Submission) 
 	if err := s.store.Update(submission); err != nil {
 		return Result{}, err
 	}
-	infrastructureFailure := func(message string) (Result, error) {
+	// infrastructureFailure records a submission-level failure. The detail is
+	// written to the server log for operators; the message returned to the
+	// caller is deliberately generic so internal paths, container names, and
+	// runtime errors are never exposed to end users.
+	infrastructureFailure := func(detail string) (Result, error) {
+		userMessage := "An internal error occurred while judging this submission. Please retry."
 		result := Result{
 			Status:         InfrastructureError,
 			TotalTestCases: len(submission.Job.TestCases),
-			ErrorMessage:   message,
+			ErrorMessage:   userMessage,
 		}
 		submission.Status = SubmissionFailed
 		submission.Result = &result
-		submission.FailureMessage = message
+		submission.FailureMessage = userMessage
 		slog.Error("submission infrastructure failure",
 			"submission_id", submission.ID,
 			"language", submission.Job.Language,
 			"worker_id", workerID,
 			"attempt", submission.AttemptCount,
-			"error", message,
+			"detail", detail,
 		)
 		if err := s.store.Update(submission); err != nil {
 			return Result{}, err
@@ -242,7 +247,7 @@ func (s *Service) ProcessSubmission(ctx context.Context, submission Submission) 
 		return infrastructureFailure("run test cases: " + err.Error())
 	}
 	if result.Status == InfrastructureError {
-		return infrastructureFailure(result.ErrorMessage)
+		return infrastructureFailure("test case execution: " + result.ErrorMessage)
 	}
 
 	submission.Status = SubmissionFinished

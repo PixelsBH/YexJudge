@@ -48,9 +48,12 @@ func createWorkspace(job Job, spec languages.Spec) (string, error) {
 		return "", err
 	}
 
-	// A root server still compiles as the dedicated container user. Transfer
+	// A rootful server still compiles as the dedicated container user. Transfer
 	// ownership after writing the source so the workspace can remain mode 0700.
-	if os.Getuid() == 0 {
+	// Rootless runtimes map container uid 0 to an unprivileged host uid that
+	// cannot chown to arbitrary uids, so the workspace keeps the default
+	// ownership and permissions there instead.
+	if rootfulRuntime() {
 		if err := os.Chown(workspace, 10001, 10001); err != nil {
 			os.RemoveAll(workspace)
 			return "", err

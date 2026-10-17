@@ -500,8 +500,14 @@ func TestProcessSubmissionPersistsInfrastructureResult(t *testing.T) {
 	if store.submission.Status != SubmissionFailed || store.submission.Result == nil {
 		t.Fatalf("stored submission = %+v, want failed infrastructure result", store.submission)
 	}
-	if store.submission.Result.Status != InfrastructureError || !strings.Contains(store.submission.Result.ErrorMessage, "permission denied") {
-		t.Fatalf("stored result = %+v, want diagnostic", store.submission.Result)
+	// The user-visible message must stay generic so internal diagnostics (file
+	// paths, container names, runtime errors) are never exposed to callers.
+	if store.submission.Result.Status != InfrastructureError ||
+		store.submission.Result.ErrorMessage != "An internal error occurred while judging this submission. Please retry." {
+		t.Fatalf("stored result = %+v, want generic infrastructure message", store.submission.Result)
+	}
+	if strings.Contains(store.submission.Result.ErrorMessage, "permission denied") {
+		t.Fatalf("stored result leaked internal diagnostic: %q", store.submission.Result.ErrorMessage)
 	}
 	if result.TotalTestCases != 1 {
 		t.Fatalf("totalTestCases = %d, want 1", result.TotalTestCases)

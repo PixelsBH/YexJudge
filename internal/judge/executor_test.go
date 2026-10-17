@@ -3,7 +3,6 @@ package judge
 import (
 	"archive/tar"
 	"context"
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -136,7 +135,7 @@ func TestDockerExecutorCompileUsesBoundedIsolatedOutput(t *testing.T) {
 		{"--workdir", "/workspace"},
 		{"--ulimit", "nofile=1024:1024"},
 		{"--ulimit", "fsize=134217728:134217728"},
-		{"--tmpfs", fmt.Sprintf("/workspace:rw,exec,size=128m,mode=700,%s", compileContainerTmpfsOwner())},
+		{"--tmpfs", "/workspace:rw,exec,size=128m,mode=700"},
 		{"-v", workspace + ":/source:ro"},
 	} {
 		if !hasExecutorArg(args, required...) {

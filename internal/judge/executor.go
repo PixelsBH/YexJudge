@@ -117,17 +117,42 @@ func (e *DockerExecutor) waitForSandboxReady(ctx context.Context, sandbox *Sandb
 }
 
 func compileContainerUser() string {
-	if os.Getuid() == 0 {
+	// A rootful server runs the compiler as the dedicated sandbox uid. Under a
+	// rootless runtime the host uid that owns the workspace is already
+	// unprivileged, and container uid 10001 maps to a separate subuid that
+	// cannot read files owned by the host uid. Running the compiler as the
+	// host uid keeps the workspace readable without granting extra privilege.
+	if rootfulRuntime() {
 		return "10001:10001"
 	}
 	return fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid())
 }
 
-func compileContainerTmpfsOwner() string {
-	if os.Getuid() == 0 {
-		return "uid=10001,gid=10001"
+// rootfulRuntime reports whether this process has real root on the host.
+// Rootless runtimes (Podman user namespaces, sysbox, etc.) report uid 0 to the
+// process while mapping it to an unprivileged host uid. Those environments
+// cannot chown files to arbitrary uids, and several Docker-only mount options
+// are rejected outright, so ownership- and uid-argument-dependent paths must be
+// skipped there.
+//
+// A process with uid 0 that is NOT in a user namespace maps to host uid 0, so
+// /proc/self/uid_map starts with "0 0 ". Rootless Podman instead maps container
+// uid 0 to the unprivileged host uid that started it (for example "0 1001 ...").
+func rootfulRuntime() bool {
+	if os.Getuid() != 0 {
+		return false
 	}
-	return fmt.Sprintf("uid=%d,gid=%d", os.Getuid(), os.Getgid())
+	contents, err := os.ReadFile("/proc/self/uid_map")
+	if err != nil {
+		// Without uid_map information, assume rootful: that preserves the
+		// previous behaviour on Docker and only risks the rootless path.
+		return true
+	}
+	fields := strings.Fields(string(contents))
+	if len(fields) < 2 || fields[0] != "0" {
+		return true
+	}
+	return fields[1] == "0"
 }
 
 func (e *DockerExecutor) Compile(ctx context.Context,
@@ -154,7 +179,7 @@ func (e *DockerExecutor) Compile(ctx context.Context,
 		return nil, fmt.Errorf("create compiler archive directory: %w", err)
 	}
 	defer os.RemoveAll(archiveDirectory)
-	if os.Getuid() == 0 {
+	if rootfulRuntime() {
 		if err := os.Chown(archiveDirectory, 10001, 10001); err != nil {
 			return nil, fmt.Errorf("set compiler archive directory owner: %w", err)
 		}
@@ -186,8 +211,8 @@ archive_size=$(wc -c < /artifacts/artifacts.tar) || exit $?
 		"--cap-drop", "ALL",
 		"--security-opt", "no-new-privileges",
 		"--read-only",
-		"--tmpfs", fmt.Sprintf("/workspace:rw,exec,size=%dm,mode=700,%s", compileWorkspaceTmpfsBytes/(1<<20), compileContainerTmpfsOwner()),
-		"--tmpfs", fmt.Sprintf("/tmp:rw,exec,nosuid,size=%dm,mode=700,%s", compileTemporaryTmpfsBytes/(1<<20), compileContainerTmpfsOwner()),
+		"--tmpfs", fmt.Sprintf("/workspace:rw,exec,size=%dm,mode=700", compileWorkspaceTmpfsBytes/(1<<20)),
+		"--tmpfs", fmt.Sprintf("/tmp:rw,exec,nosuid,size=%dm,mode=700", compileTemporaryTmpfsBytes/(1<<20)),
 		"--env", "HOME=/tmp",
 		"--env", "GOCACHE=/tmp/go-build",
 		"--env", "GOMODCACHE=/tmp/go-mod",
@@ -248,8 +273,8 @@ func (e *DockerExecutor) StartSandbox(ctx context.Context) (*Sandbox, error) {
 		"--user", "0:0",
 		"--security-opt", "no-new-privileges",
 		"--read-only",
-		"--tmpfs", "/workspace:rw,exec,size=64m,mode=1777,uid=0,gid=0",
-		"--tmpfs", "/tmp:rw,noexec,nosuid,size=16m,mode=1777,uid=0,gid=0",
+		"--tmpfs", "/workspace:rw,exec,size=64m,mode=1777",
+		"--tmpfs", "/tmp:rw,noexec,nosuid,size=16m,mode=1777",
 	)
 	runArgs = append(runArgs, "--workdir", "/workspace", RuntimeSandboxImage, "sleep", "infinity")
 	result, err := e.runner.Run(ctxContainer, "", "docker", runArgs...)
