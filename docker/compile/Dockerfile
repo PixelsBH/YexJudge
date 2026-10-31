@@ -1,4 +1,4 @@
-FROM gcc:13
+FROM docker.io/library/gcc:13
 
 ARG YEXJUDGE_CPP_FLAGS
 COPY internal/judge/languages/cpp_compile_flags.txt /usr/local/share/yexjudge/cpp_compile_flags.txt
