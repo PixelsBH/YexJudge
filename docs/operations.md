@@ -138,25 +138,23 @@ The response includes queued/running/failed counts, worker and compile-worker ca
 
 ## Docker Compose deployment
 
-From the project root, put a strong hex password in the ignored `.env` file, create the dedicated workspace directory, and start Compose:
+From the project root, copy the template and set a strong database password, the engine socket, and an absolute workspace directory in the ignored `.env` file:
 
 ```bash
+cp .env.example .env
 openssl rand -hex 32
-```
-
-Copy the generated value into `.env` as `POSTGRES_PASSWORD=<generated-hex-password>`, then run:
-
-```bash
 chmod 600 .env
-mkdir -p /home/pixels/.local/share/yexjudge/workspaces
-docker compose up --build
 ```
+
+For rootless Podman, set `CONTAINER_SOCKET=/run/user/<uid>/podman/podman.sock` (replace `<uid>` with the value from `id -u`) and enable the Podman user socket. For Docker, use `CONTAINER_SOCKET=/var/run/docker.sock`. Set `WORKSPACE_DIR` to an absolute directory writable by the deployment user, then create it. Keep the generated password private; changing it later does not rotate the password in an existing database volume.
+
+Start with `podman compose up --build -d` for Podman or `docker compose up --build -d` for Docker. The server and PostgreSQL start in the background.
 
 Compose requires `POSTGRES_PASSWORD`; the hex value avoids URL-escaping problems in the PostgreSQL connection URL. Compose passes this setting to PostgreSQL for first-time initialization and uses it in YexJudge's `DATABASE_URL`. Do not commit `.env`. Changing `POSTGRES_PASSWORD` does not rotate credentials in an existing volume; preserve the existing password or deliberately rotate the database role password as described in [Troubleshooting](#troubleshooting). The Compose worker capacities are `WORKER_COUNT=4`, `SANDBOX_POOL_SIZE=4`, and `COMPILE_SLOTS=2`, configured in `docker-compose.yml` rather than `.env`.
 
-PostgreSQL has no published host port and is reachable only over Compose's private network at `postgres:5432`. The API is published only on `127.0.0.1:8080` (override the host port with `API_HOST_PORT`), so a host process such as YexCode can call `http://127.0.0.1:8080`. Configure the public reverse proxy to route only to YexCode; do not add a public route to YexJudge. If YexCode is containerized, its own `127.0.0.1` is not the VPS host, so use a private container-network path for that connection instead. The workspace bind mount defaults to `/home/pixels/.local/share/yexjudge/workspaces` on both host and server container; change both path values in `docker-compose.yml` if deploying under another user or host.
+PostgreSQL has no published host port and is reachable only over Compose's private network at `postgres:5432`. The API is published only on `127.0.0.1:8080` (override the host port with `API_HOST_PORT`), so a host-side website reverse proxy can call `http://127.0.0.1:8080`. Do not add a public route to YexJudge. If the website is containerized, its own loopback address is not the host; use an appropriately restricted private network path instead. Set the absolute `WORKSPACE_DIR` in `.env`; Compose mounts it at the same path in the server container for sandbox bind mounts.
 
-Compose mounts the Docker socket so YexJudge can launch sibling compile/runtime containers. Access to that socket gives YexJudge powerful control over the host Docker daemon; keep the service private and do not mount the socket into YexCode or expose it to clients. The workspace directory is mounted at the same absolute path in the server container so the host daemon can resolve workspace bind mounts. This setup is intended for a single-VPS personal/demo deployment, not as a multi-tenant isolation boundary.
+Compose mounts the container engine API socket so YexJudge can launch sibling compile/runtime containers. Docker defaults to `/var/run/docker.sock`; rootless Podman uses `/run/user/<uid>/podman/podman.sock` after enabling its user socket. Set `CONTAINER_SOCKET` in `.env` to the path for the active engine. Socket access grants powerful control over the container engine; never expose it to clients or mount it into the website container. This setup is intended for a single-VPS personal/demo deployment, not as a multi-tenant isolation boundary.
 
 Stop the deployment with:
 

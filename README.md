@@ -4,7 +4,7 @@ YexJudge is a small online judge service written in Go. It accepts code submissi
 
 ## Installation
 
-Requirements: Docker (with Compose v2 for the Compose setup), Go for running the server directly, and PostgreSQL for direct runs. Compose starts its own PostgreSQL service. Docker must be running and accessible to YexJudge.
+Requirements: Docker or rootless Podman with a Compose provider for the Compose setup, Go for running the server directly, and PostgreSQL for direct runs. Compose starts its own PostgreSQL service. The selected container engine must be running and its API socket accessible to YexJudge.
 
 The Compose stack builds `yexjudge-runtime:latest` automatically from
 `docker/runtime/Dockerfile`. If you run the Go server directly instead of with
@@ -14,32 +14,19 @@ Compose, build the runtime image manually:
 docker build -t yexjudge-runtime:latest -f docker/runtime/Dockerfile .
 ```
 
-### Run with Docker Compose
+### Run with Compose
 
-Compose starts YexJudge and PostgreSQL. Before the first startup, generate a strong URL-safe password:
-
-```bash
-openssl rand -hex 32
-```
-
-Put the generated value in `.env` in the YexJudge project root as:
-
-```text
-POSTGRES_PASSWORD=<paste-the-generated-hex-password>
-```
-
-Keep `.env` private and set restrictive permissions with `chmod 600 .env`. Compose uses this setting both to initialize PostgreSQL and to build YexJudge's database connection URL. The password must match the password stored in the database; changing `.env` later does not rotate the password in an existing PostgreSQL volume. For an existing volume or a password-authentication error, follow the [PostgreSQL troubleshooting steps](docs/operations.md#troubleshooting).
-
-The Compose worker capacities are set in `docker-compose.yml`: `WORKER_COUNT=4`, `SANDBOX_POOL_SIZE=4`, and `COMPILE_SLOTS=2`. Do not put these in `.env` to configure the Compose stack; Compose does not pass arbitrary `.env` entries into the container. The application receives the values explicitly from the Compose service configuration.
-
-Then prepare the workspace and start the stack:
+Compose starts YexJudge and PostgreSQL. Copy `.env.example` to `.env`, then set a strong `POSTGRES_PASSWORD`, `CONTAINER_SOCKET`, and absolute `WORKSPACE_DIR`. Docker uses `/var/run/docker.sock`; rootless Podman uses `/run/user/<uid>/podman/podman.sock` (replace `<uid>` with `id -u` and enable the Podman user socket). Generate a URL-safe database password with `openssl rand -hex 32`. Keep `.env` private; changing the password later does not rotate credentials in an existing database volume.
 
 ```bash
-mkdir -p /home/pixels/.local/share/yexjudge/workspaces
-docker compose up --build
+cp .env.example .env
+chmod 600 .env
+podman compose up --build -d  # or: docker compose up --build -d
 ```
 
-The API is available to processes on the VPS at `http://127.0.0.1:8080`; it is not published on public interfaces. Stop the stack with `docker compose down`; Compose gives the server time to remove its runtime sandbox containers during shutdown.
+Before starting, create the absolute path configured as `WORKSPACE_DIR`. Compose worker capacities remain configured in `docker-compose.yml`.
+
+The API is bound to `127.0.0.1:8080`, not public interfaces. See [Operations](docs/operations.md#docker-compose-deployment) for workspace, socket, and reverse-proxy details. Stop the stack with `podman compose down` or `docker compose down`.
 
 ### Run the Go server directly
 
