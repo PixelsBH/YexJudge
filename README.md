@@ -1,36 +1,43 @@
 # YexJudge
 
-YexJudge is a small online judge service written in Go. It accepts code submissions, queues them, processes them with background workers, and runs test cases inside reusable Docker sandboxes. It uses PostgreSQL for durable submission storage and supports conventional stdin/stdout submissions in C, C++, and Python, along with metadata-driven C++ and Python Function and Class modes.
+YexJudge is a small online judge service written in Go. It accepts code submissions, queues them, processes them with background workers, and runs test cases in isolated container sandboxes. It uses PostgreSQL for durable submission storage and supports conventional stdin/stdout submissions in C, C++, and Python, along with metadata-driven C++ and Python Function and Class modes. Rootless Podman is the recommended container runtime.
 
 ## Installation
 
-Requirements: Docker or rootless Podman with a Compose provider for the Compose setup, Go for running the server directly, and PostgreSQL for direct runs. Compose starts its own PostgreSQL service. The selected container engine must be running and its API socket accessible to YexJudge.
+Requirements for the recommended deployment: rootless Podman, a Compose provider (`podman-compose` or Docker Compose), and Go plus PostgreSQL only if running the server directly. The Compose stack starts PostgreSQL and builds the YexJudge images. The server uses the Docker-compatible Podman API over a Unix socket; a Docker daemon is not required.
 
-The Compose stack builds `yexjudge-runtime:latest` automatically from
-`docker/runtime/Dockerfile`. If you run the Go server directly instead of with
-Compose, build the runtime image manually:
+If you run the Go server directly instead of with Compose, build the runtime image with Podman:
 
 ```bash
-docker build -t yexjudge-runtime:latest -f docker/runtime/Dockerfile .
+podman build -t yexjudge-runtime:latest -f docker/runtime/Dockerfile .
 ```
 
-### Run with Compose
+### Run with rootless Podman Compose
 
-Compose starts YexJudge and PostgreSQL. Copy `.env.example` to `.env`, then set a strong `POSTGRES_PASSWORD`, `CONTAINER_SOCKET`, and absolute `WORKSPACE_DIR`. Docker uses `/var/run/docker.sock`; rootless Podman uses `/run/user/<uid>/podman/podman.sock` (replace `<uid>` with `id -u` and enable the Podman user socket). Generate a URL-safe database password with `openssl rand -hex 32`. Keep `.env` private; changing the password later does not rotate credentials in an existing database volume.
+Copy `.env.example` to `.env`. Set `POSTGRES_PASSWORD` to a strong URL-safe value (generate one with `openssl rand -hex 32`), set `CONTAINER_SOCKET` to `/run/user/<uid>/podman/podman.sock` (replace `<uid>` with the output of `id -u`), and set `WORKSPACE_DIR` to an absolute host directory. Keep `.env` private; changing the password later does not rotate credentials in an existing database volume.
 
 ```bash
 cp .env.example .env
 chmod 600 .env
-podman compose up --build -d  # or: docker compose up --build -d
+openssl rand -hex 32
+mkdir -p "$HOME/.local/share/yexjudge/workspaces"
+realpath "$HOME/.local/share/yexjudge/workspaces"
+systemctl --user enable --now podman.socket
 ```
 
-Before starting, create the absolute path configured as `WORKSPACE_DIR`. Compose worker capacities remain configured in `docker-compose.yml`.
+Put the generated password in `POSTGRES_PASSWORD` in `.env`, set `WORKSPACE_DIR` to the absolute path printed by `realpath`, and set `CONTAINER_SOCKET` using your UID. Then start the stack:
 
-The API is bound to `127.0.0.1:8080`, not public interfaces. See [Operations](docs/operations.md#docker-compose-deployment) for workspace, socket, and reverse-proxy details. Stop the stack with `podman compose down` or `docker compose down`.
+```bash
+podman compose up --build -d
+``` The workspace is mounted at the same path inside YexJudge so Podman can bind-mount it into compile and runtime containers. Compose worker capacities remain configured in `docker-compose.yml`.
+
+The API is bound to `127.0.0.1:8080`, not public interfaces. See [Operations](docs/operations.md#docker-compose-deployment) for workspace, socket, and reverse-proxy details. Stop the stack with `podman compose down`.
+
+YexJudge’s server image includes the Docker CLI as a client for Podman’s Docker-compatible API. `CONTAINER_SOCKET` points to the host’s rootless Podman socket, which is mounted inside the server container at `/var/run/docker.sock`; the API is not exposed over TCP. Access to this socket grants control over the deployment user’s Podman containers, so keep it private and never mount it into the website container.
 
 ### Run the Go server directly
 
-Create the PostgreSQL database, copy the environment template, and configure `DATABASE_URL` in `.env`:
+For a direct Go server run, create the PostgreSQL database and configure `DATABASE_URL`. The server also needs the Docker-compatible CLI/API client configured to use the rootless Podman socket.
 
 ```bash
 createdb -U postgres yexjudge
