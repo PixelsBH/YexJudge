@@ -45,6 +45,30 @@ func runGeneratedPython(t *testing.T, request harness.ModeRequest, input string)
 	return strings.TrimSpace(string(output))
 }
 
+func TestPythonFunctionHarnessProvidesTypingAndCommonStandardLibraryImports(t *testing.T) {
+	got := runGeneratedPython(t, harness.ModeRequest{
+		SourceCode: `class Solution:
+    def twoSum(self, nums: List[int], target: int) -> List[int]:
+        seen = {}
+        for index, number in enumerate(nums):
+            if target - number in seen:
+                return [seen[target - number], index]
+            seen[number] = index
+        return []`,
+		Contract: harness.ExecutionContract{
+			Mode: harness.ModeFunction,
+			Function: &harness.FunctionSpec{
+				Name: "twoSum", ReturnType: "vector<int>",
+				Params: []harness.Parameter{{Name: "nums", Type: "vector<int>"}, {Name: "target", Type: "int"}},
+			},
+		},
+		TestCases: []harness.TestCase{{ID: 1, Args: []json.RawMessage{json.RawMessage(`[2,7,11,15]`), json.RawMessage(`9`)}, Expected: json.RawMessage(`[0,1]`)}},
+	}, "1\n")
+	if got != "[0,1]" {
+		t.Fatalf("Two Sum harness output = %q, want [0,1]", got)
+	}
+}
+
 func TestPythonFunctionHarnessSupportsRecursiveValues(t *testing.T) {
 	got := runGeneratedPython(t, harness.ModeRequest{
 		SourceCode: `class Solution:

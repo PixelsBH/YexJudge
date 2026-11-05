@@ -1,6 +1,16 @@
 package python
 
 const runtimeSource = `
+from typing import *
+from collections import *
+from functools import *
+import bisect
+import heapq
+import itertools
+import math
+import re
+import string
+
 import contextlib as __yexjudge_contextlib
 import io as __yexjudge_io
 import json as __yexjudge_json
